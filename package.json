@@ -1,0 +1,24 @@
+{
+  "name": "@aerobeat/web-input",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "scripts": {
+    "check": "npm run check:jsdoc && npm run check:imports && npm run check:components && npm run check:console",
+    "check:jsdoc": "node scripts/validate-jsdoc-no-any.js",
+    "check:imports": "node scripts/validate-public-imports.js",
+    "check:components": "node scripts/validate-component-rules.js",
+    "check:console": "node scripts/validate-playwright-console-noise.js",
+    "test": "npm run check",
+    "test:browser": "npm run check:console",
+    "demo": "npm --prefix .testbed run demo",
+    "testbed:serve": "npm --prefix .testbed run serve",
+    "testbed:link-self": "node scripts/link-testbed-self.js"
+  },
+  "peerDependencies": {
+    "@aerobeat/web-contracts": "0.0.0"
+  }
+}

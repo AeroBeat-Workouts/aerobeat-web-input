@@ -1,0 +1,12 @@
+{
+  "name": "@aerobeat/web-input-testbed",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "demo": "echo \"Add a repo-local Vite or static demo command when input scenes need serving.\"",
+    "serve": "echo \"Define host, port, cache busting, QR/link output, served roots, and secure-context handling before mobile validation.\"",
+    "test": "echo \"Add input router tests for live, video, and replay feed fixtures.\"",
+    "test:browser": "echo \"Add Playwright browser tests for component-composed input scenes.\""
+  }
+}
