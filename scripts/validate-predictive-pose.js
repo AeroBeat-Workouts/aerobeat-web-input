@@ -260,14 +260,20 @@ const trace = Array.from({ length: 21 }, (_, index) => frame(index * 25, 0.2 + i
 const oracle = evaluateHeldOutPoseTrace(trace);
 assert.equal(oracle.referenceFrameCount, 21);
 assert.equal(oracle.measuredFrameCount, 5);
+assert.equal(oracle.heldOutFrameCount, 16);
 assert.equal(oracle.heldOutPredictionCount, 12);
-assert.ok((oracle.normalizedMeanJointError ?? 1) < 1e-9);
-assert.equal(oracle.wristNoseCellAgreement, 1);
-assert.equal(oracle.bodyGridCellAgreement, 1);
-assert.equal(oracle.intentPrecision, 1);
-assert.ok((oracle.intentRecall ?? 0) > 0 && (oracle.intentRecall ?? 1) < 1);
-assert.equal(oracle.transitionTimingMeanErrorMs, 0);
-assert.equal(oracle.falseRepeatedEventCount, 0);
+assert.equal(oracle.treatmentPredictionCoverage, 0.75);
+assert.ok((oracle.control.landmarkErrorMean ?? 0) > (oracle.treatment.landmarkErrorMean ?? 1));
+assert.ok((oracle.treatmentMinusControl.landmarkMeanErrorReductionRatio ?? 0) > 0.7);
+assert.ok((oracle.treatmentMinusControl.bodyGridCellAgreement ?? 0) > 0);
+assert.ok((oracle.treatmentMinusControl.intentRecall ?? 0) > 0);
+assert.ok((oracle.treatmentMinusControl.intentF1 ?? 0) >= oracle.thresholds.minimumIntentF1Delta);
+assert.equal(oracle.control.falseRepeatedEventCount, 0);
+assert.equal(oracle.treatment.falseRepeatedEventCount, 0);
+assert.equal(oracle.treatment.emittedEventCount, oracle.control.emittedEventCount, "improvement must not come from emitting fewer events");
+assert.equal(oracle.predictionImprovesControl, true);
+assert.equal(oracle.recommendation, "prediction-improves-control");
+assert.equal(oracle.normalizedMeanJointError, oracle.treatment.landmarkErrorMean, "legacy aliases must remain treatment metrics");
 
 const occludedTrace = [
   frame(0, 0.2),
@@ -276,6 +282,11 @@ const occludedTrace = [
   frame(250, 0.4),
   frame(375, 0.5)
 ];
-assert.ok(evaluateHeldOutPoseTrace(occludedTrace).suppressedPredictionCount > 0);
+const occludedOracle = evaluateHeldOutPoseTrace(occludedTrace);
+assert.ok(occludedOracle.suppressedPredictionCount > 0);
+assert.ok((occludedOracle.treatmentPredictionCoverage ?? 1) < occludedOracle.thresholds.minimumTreatmentPredictionCoverage);
+assert.equal(occludedOracle.predictionImprovesControl, false);
+assert.equal(occludedOracle.recommendation, "prediction-does-not-improve-control");
+assert.equal(occludedOracle.treatment.falseRepeatedEventCount, 0);
 
 console.log("Predictive pose routing validation passed.");

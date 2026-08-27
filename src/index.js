@@ -17,6 +17,21 @@ export const aeroGameplayPoseLandmarkNames = Object.freeze([
 export const aeroPosePredictionMaxHorizonMs = 125;
 export const aeroPosePredictionWindowCapacity = 120;
 
+export const defaultPoseTraceOracleThresholds = Object.freeze({
+  minimumLandmarkMeanErrorReductionRatio: 0.25,
+  maximumLandmarkP95Regression: 0,
+  minimumIntentF1Delta: 0.02,
+  minimumIntentRecallDelta: 0,
+  minimumTreatmentIntentRecall: 0.3,
+  minimumGridAgreementDelta: 0,
+  maximumIntentPrecisionLoss: 0.02,
+  maximumFalsePositiveIncrease: 0,
+  maximumFalseRepeatedEvents: 0,
+  minimumTreatmentPredictionCoverage: 0.5,
+  maximumTransitionTimingRegressionMs: 0,
+  maximumTreatmentTransitionTimingMeanErrorMs: 50
+});
+
 /**
  * @typedef {"live-camera" | "video-feed" | "replay-fixture"} PoseInputFeedKind
  * @typedef {"boxing" | "flow"} InputGameplayMode
@@ -96,10 +111,91 @@ export const aeroPosePredictionWindowCapacity = 120;
  */
 
 /**
+ * @typedef {Object} PoseTraceOracleThresholds
+ * @property {number} minimumLandmarkMeanErrorReductionRatio
+ * @property {number} maximumLandmarkP95Regression
+ * @property {number} minimumIntentF1Delta
+ * @property {number} minimumIntentRecallDelta
+ * @property {number} minimumTreatmentIntentRecall
+ * @property {number} minimumGridAgreementDelta
+ * @property {number} maximumIntentPrecisionLoss
+ * @property {number} maximumFalsePositiveIncrease
+ * @property {number} maximumFalseRepeatedEvents
+ * @property {number} minimumTreatmentPredictionCoverage
+ * @property {number} maximumTransitionTimingRegressionMs
+ * @property {number} maximumTreatmentTransitionTimingMeanErrorMs
+ */
+
+/**
+ * @typedef {Object} PoseTraceLaneMetrics
+ * @property {number | undefined} landmarkErrorP50
+ * @property {number | undefined} landmarkErrorP95
+ * @property {number | undefined} landmarkErrorMax
+ * @property {number | undefined} landmarkErrorMean
+ * @property {number | undefined} wristNoseCellAgreement
+ * @property {number | undefined} bodyGridCellAgreement
+ * @property {number | undefined} intentPrecision
+ * @property {number | undefined} intentRecall
+ * @property {number | undefined} intentF1
+ * @property {number | undefined} transitionTimingMeanErrorMs
+ * @property {number} emittedEventCount
+ * @property {number} matchedEventCount
+ * @property {number} falsePositiveEventCount
+ * @property {number} falseNegativeEventCount
+ * @property {number} falseRepeatedEventCount
+ */
+
+/**
+ * @typedef {Object} PoseTraceLaneAccumulator
+ * @property {number[]} jointErrors
+ * @property {number} wristNoseCellComparisons
+ * @property {number} wristNoseCellMatches
+ * @property {number} bodyGridCellComparisons
+ * @property {number} bodyGridCellMatches
+ * @property {Map<string, number[]>} transitions
+ * @property {Set<string>} emittedPulseLineages
+ * @property {number} emittedEventCount
+ * @property {number} matchedEventCount
+ * @property {number} falsePositiveEventCount
+ * @property {number} falseNegativeEventCount
+ * @property {number} falseRepeatedEventCount
+ */
+
+/**
+ * @typedef {Object} PoseTraceOracleDeltas
+ * @property {number | undefined} landmarkErrorP50
+ * @property {number | undefined} landmarkErrorP95
+ * @property {number | undefined} landmarkErrorMax
+ * @property {number | undefined} landmarkErrorMean
+ * @property {number | undefined} landmarkMeanErrorReductionRatio
+ * @property {number | undefined} wristNoseCellAgreement
+ * @property {number | undefined} bodyGridCellAgreement
+ * @property {number | undefined} intentPrecision
+ * @property {number | undefined} intentRecall
+ * @property {number | undefined} intentF1
+ * @property {number | undefined} transitionTimingMeanErrorMs
+ * @property {number} emittedEventCount
+ * @property {number} matchedEventCount
+ * @property {number} falsePositiveEventCount
+ * @property {number} falseNegativeEventCount
+ * @property {number} falseRepeatedEventCount
+ */
+
+/**
  * @typedef {Object} PoseTraceOracleResult
  * @property {number} referenceFrameCount
  * @property {number} measuredFrameCount
+ * @property {number} heldOutFrameCount
  * @property {number} heldOutPredictionCount
+ * @property {number} suppressedPredictionCount
+ * @property {number} referenceEventCount
+ * @property {number | undefined} treatmentPredictionCoverage
+ * @property {PoseTraceLaneMetrics} control
+ * @property {PoseTraceLaneMetrics} treatment
+ * @property {PoseTraceOracleDeltas} treatmentMinusControl
+ * @property {PoseTraceOracleThresholds} thresholds
+ * @property {boolean} predictionImprovesControl
+ * @property {"prediction-improves-control" | "prediction-does-not-improve-control"} recommendation
  * @property {number | undefined} normalizedMeanJointError
  * @property {number | undefined} normalizedP95JointError
  * @property {number | undefined} normalizedMaxJointError
@@ -107,9 +203,9 @@ export const aeroPosePredictionWindowCapacity = 120;
  * @property {number | undefined} bodyGridCellAgreement
  * @property {number | undefined} intentPrecision
  * @property {number | undefined} intentRecall
+ * @property {number | undefined} intentF1
  * @property {number | undefined} transitionTimingMeanErrorMs
  * @property {number} falseRepeatedEventCount
- * @property {number} suppressedPredictionCount
  */
 
 /**
@@ -449,114 +545,333 @@ export function createPosePredictor(options = {}) {
  * plus predictions at omitted timestamps.
  *
  * @param {readonly NormalizedPoseFrame[]} frames
- * @param {{ measuredRateFps?: number }} [options]
+ * @param {{ measuredRateFps?: number, thresholds?: Partial<PoseTraceOracleThresholds> }} [options]
  * @returns {PoseTraceOracleResult}
  */
 export function evaluateHeldOutPoseTrace(frames, options = {}) {
   const intervalMs = 1000 / finitePositive(options.measuredRateFps, 8);
-  const predictor = createPosePredictor({ routeEpochPrefix: "oracle-candidate" });
+  const thresholds = resolveOracleThresholds(options.thresholds);
+  const predictor = createPosePredictor({ routeEpochPrefix: "oracle-treatment" });
   const referenceRouter = createPoseInputRouter();
-  const candidateRouter = createPoseInputRouter();
-  /** @type {number[]} */
-  const jointErrors = [];
+  const controlRouter = createPoseInputRouter();
+  const treatmentRouter = createPoseInputRouter();
+  const controlAccumulator = createOracleLaneAccumulator();
+  const treatmentAccumulator = createOracleLaneAccumulator();
   /** @type {Map<string, number[]>} */
   const referenceTransitions = new Map();
-  /** @type {Map<string, number[]>} */
-  const candidateTransitions = new Map();
-  /** @type {Set<string>} */
-  const emittedPulseLineages = new Set();
   let measuredFrameCount = 0;
+  let heldOutFrameCount = 0;
   let heldOutPredictionCount = 0;
-  let cellComparisons = 0;
-  let cellMatches = 0;
-  let truePositive = 0;
-  let falsePositive = 0;
-  let falseNegative = 0;
-  let falseRepeatedEventCount = 0;
   let suppressedPredictionCount = 0;
+  let referenceEventCount = 0;
   let lastMeasuredTimestampMs = Number.NEGATIVE_INFINITY;
+  /** @type {AeroPoseRoutingSample | undefined} */
+  let latestMeasuredSample;
 
   for (const frame of [...frames].sort((a, b) => a.timestampMs - b.timestampMs)) {
     const referenceSample = createMeasuredPoseRoutingSample(frame, { routeEpoch: "oracle-reference" });
     const referenceEvents = referenceRouter.routePoseSampleBatch(referenceSample);
+    referenceEventCount += referenceEvents.length;
     recordTransitions(referenceTransitions, referenceEvents);
 
+    /** @type {AeroPoseRoutingSample} */
+    let controlSample;
     /** @type {AeroPoseRoutingSample | undefined} */
-    let candidateSample;
+    let treatmentSample;
+    /** @type {AeroPoseRoutingSample} */
+    let treatmentPose;
     if (frame.timestampMs - lastMeasuredTimestampMs + Number.EPSILON >= intervalMs) {
-      candidateSample = predictor.pushMeasuredFrame(frame);
+      latestMeasuredSample = predictor.pushMeasuredFrame(frame);
+      controlSample = latestMeasuredSample;
+      treatmentSample = latestMeasuredSample;
+      treatmentPose = latestMeasuredSample;
       lastMeasuredTimestampMs = frame.timestampMs;
       measuredFrameCount += 1;
     } else {
-      candidateSample = predictor.predict(frame.timestampMs);
-      if (!candidateSample) {
+      heldOutFrameCount += 1;
+      controlSample = createHeldPoseRoutingSample(latestMeasuredSample, frame.timestampMs);
+      treatmentSample = predictor.predict(frame.timestampMs);
+      treatmentPose = treatmentSample ?? controlSample;
+      if (treatmentSample) {
+        heldOutPredictionCount += 1;
+      } else {
         suppressedPredictionCount += 1;
-        falseNegative += new Set(referenceEvents.map(eventSignature)).size;
-        continue;
       }
-      heldOutPredictionCount += 1;
-      for (const name of aeroGameplayPoseLandmarkNames) {
-        const actual = findLandmark(frame, name);
-        const estimate = findRoutingLandmark(candidateSample, name);
-        if (actual && estimate) {
-          jointErrors.push(Math.hypot(actual.x - estimate.x, actual.y - estimate.y));
-        }
-      }
-      for (const name of ["left_wrist", "right_wrist", "nose"]) {
-        const actual = findLandmark(frame, name);
-        const estimate = findRoutingLandmark(candidateSample, name);
-        if (actual && estimate) {
-          cellComparisons += 1;
-          if (sameCell(actual, estimate)) {
-            cellMatches += 1;
-          }
-        }
-      }
+      recordPoseComparison(controlAccumulator, frame, controlSample);
+      recordPoseComparison(treatmentAccumulator, frame, treatmentPose);
     }
 
-    const candidateEvents = candidateRouter.routePoseSampleBatch(candidateSample);
-    recordTransitions(candidateTransitions, candidateEvents);
-    for (const event of candidateEvents) {
-      if (event.mode === "boxing" && isPulseIntent(event.detail.name)) {
-        const key = `${event.detail.name}:${event.detail.routeEpoch}:${event.detail.measuredSourceFrameId}`;
-        if (emittedPulseLineages.has(key)) {
-          falseRepeatedEventCount += 1;
-        }
-        emittedPulseLineages.add(key);
-      }
-    }
-    const reference = new Set(referenceEvents.map(eventSignature));
-    const candidate = new Set(candidateEvents.map(eventSignature));
-    for (const signature of candidate) {
-      if (reference.has(signature)) {
-        truePositive += 1;
-      } else {
-        falsePositive += 1;
-      }
-    }
-    for (const signature of reference) {
-      if (!candidate.has(signature)) {
-        falseNegative += 1;
-      }
-    }
+    const controlEvents = controlRouter.routePoseSampleBatch(controlSample);
+    const treatmentEvents = treatmentSample ? treatmentRouter.routePoseSampleBatch(treatmentSample) : [];
+    recordOracleEvents(controlAccumulator, referenceEvents, controlEvents);
+    recordOracleEvents(treatmentAccumulator, referenceEvents, treatmentEvents);
   }
 
-  const transitionErrors = transitionTimingErrors(referenceTransitions, candidateTransitions);
+  const control = finishOracleLane(controlAccumulator, referenceTransitions);
+  const treatment = finishOracleLane(treatmentAccumulator, referenceTransitions);
+  const treatmentMinusControl = compareOracleLanes(control, treatment);
+  const treatmentPredictionCoverage = ratio(heldOutPredictionCount, heldOutFrameCount);
+  const predictionImprovesControl = oraclePassesThresholds(
+    control,
+    treatment,
+    treatmentMinusControl,
+    treatmentPredictionCoverage,
+    thresholds
+  );
   return {
     referenceFrameCount: frames.length,
     measuredFrameCount,
+    heldOutFrameCount,
     heldOutPredictionCount,
-    normalizedMeanJointError: average(jointErrors),
-    normalizedP95JointError: percentile(jointErrors, 0.95),
-    normalizedMaxJointError: jointErrors.length > 0 ? Math.max(...jointErrors) : undefined,
-    wristNoseCellAgreement: ratio(cellMatches, cellComparisons),
-    bodyGridCellAgreement: ratio(cellMatches, cellComparisons),
-    intentPrecision: ratio(truePositive, truePositive + falsePositive),
-    intentRecall: ratio(truePositive, truePositive + falseNegative),
-    transitionTimingMeanErrorMs: average(transitionErrors),
-    falseRepeatedEventCount,
-    suppressedPredictionCount
+    suppressedPredictionCount,
+    referenceEventCount,
+    treatmentPredictionCoverage,
+    control,
+    treatment,
+    treatmentMinusControl,
+    thresholds,
+    predictionImprovesControl,
+    recommendation: predictionImprovesControl ? "prediction-improves-control" : "prediction-does-not-improve-control",
+    normalizedMeanJointError: treatment.landmarkErrorMean,
+    normalizedP95JointError: treatment.landmarkErrorP95,
+    normalizedMaxJointError: treatment.landmarkErrorMax,
+    wristNoseCellAgreement: treatment.wristNoseCellAgreement,
+    bodyGridCellAgreement: treatment.bodyGridCellAgreement,
+    intentPrecision: treatment.intentPrecision,
+    intentRecall: treatment.intentRecall,
+    intentF1: treatment.intentF1,
+    transitionTimingMeanErrorMs: treatment.transitionTimingMeanErrorMs,
+    falseRepeatedEventCount: treatment.falseRepeatedEventCount
   };
+}
+
+/** @returns {PoseTraceLaneAccumulator} */
+function createOracleLaneAccumulator() {
+  return {
+    jointErrors: [],
+    wristNoseCellComparisons: 0,
+    wristNoseCellMatches: 0,
+    bodyGridCellComparisons: 0,
+    bodyGridCellMatches: 0,
+    transitions: new Map(),
+    emittedPulseLineages: new Set(),
+    emittedEventCount: 0,
+    matchedEventCount: 0,
+    falsePositiveEventCount: 0,
+    falseNegativeEventCount: 0,
+    falseRepeatedEventCount: 0
+  };
+}
+
+/**
+ * @param {AeroPoseRoutingSample | undefined} latestMeasuredSample
+ * @param {number} targetTimestampMs
+ * @returns {AeroPoseRoutingSample}
+ */
+function createHeldPoseRoutingSample(latestMeasuredSample, targetTimestampMs) {
+  if (!latestMeasuredSample) {
+    throw new Error("Held-out oracle control requires an earlier measured sample.");
+  }
+  return {
+    ...latestMeasuredSample,
+    targetTimestampMs,
+    predictionHorizonMs: targetTimestampMs - latestMeasuredSample.measurementTimestampMs
+  };
+}
+
+/**
+ * @param {PoseTraceLaneAccumulator} accumulator
+ * @param {NormalizedPoseFrame} actualFrame
+ * @param {AeroPoseRoutingSample} sample
+ */
+function recordPoseComparison(accumulator, actualFrame, sample) {
+  for (const name of aeroGameplayPoseLandmarkNames) {
+    const actual = findLandmark(actualFrame, name);
+    const estimate = findRoutingLandmark(sample, name);
+    if (!actual || !estimate) {
+      continue;
+    }
+    accumulator.jointErrors.push(Math.hypot(actual.x - estimate.x, actual.y - estimate.y));
+    accumulator.bodyGridCellComparisons += 1;
+    if (sameCell(actual, estimate)) {
+      accumulator.bodyGridCellMatches += 1;
+    }
+    if (name === "left_wrist" || name === "right_wrist" || name === "nose") {
+      accumulator.wristNoseCellComparisons += 1;
+      if (sameCell(actual, estimate)) {
+        accumulator.wristNoseCellMatches += 1;
+      }
+    }
+  }
+}
+
+/**
+ * @param {PoseTraceLaneAccumulator} accumulator
+ * @param {readonly PoseInputDraftEvent[]} referenceEvents
+ * @param {readonly PoseInputDraftEvent[]} candidateEvents
+ */
+function recordOracleEvents(accumulator, referenceEvents, candidateEvents) {
+  accumulator.emittedEventCount += candidateEvents.length;
+  recordTransitions(accumulator.transitions, candidateEvents);
+  for (const event of candidateEvents) {
+    if (event.mode === "boxing" && isPulseIntent(event.detail.name)) {
+      const key = `${event.detail.name}:${event.detail.routeEpoch}:${event.detail.measuredSourceFrameId}`;
+      if (accumulator.emittedPulseLineages.has(key)) {
+        accumulator.falseRepeatedEventCount += 1;
+      }
+      accumulator.emittedPulseLineages.add(key);
+    }
+  }
+  const reference = new Set(referenceEvents.map(eventSignature));
+  const candidate = new Set(candidateEvents.map(eventSignature));
+  for (const signature of candidate) {
+    if (reference.has(signature)) {
+      accumulator.matchedEventCount += 1;
+    } else {
+      accumulator.falsePositiveEventCount += 1;
+    }
+  }
+  for (const signature of reference) {
+    if (!candidate.has(signature)) {
+      accumulator.falseNegativeEventCount += 1;
+    }
+  }
+}
+
+/**
+ * @param {PoseTraceLaneAccumulator} accumulator
+ * @param {Map<string, number[]>} referenceTransitions
+ * @returns {PoseTraceLaneMetrics}
+ */
+function finishOracleLane(accumulator, referenceTransitions) {
+  const precision = ratio(
+    accumulator.matchedEventCount,
+    accumulator.matchedEventCount + accumulator.falsePositiveEventCount
+  );
+  const recall = ratio(
+    accumulator.matchedEventCount,
+    accumulator.matchedEventCount + accumulator.falseNegativeEventCount
+  );
+  return {
+    landmarkErrorP50: percentile(accumulator.jointErrors, 0.5),
+    landmarkErrorP95: percentile(accumulator.jointErrors, 0.95),
+    landmarkErrorMax: accumulator.jointErrors.length > 0 ? Math.max(...accumulator.jointErrors) : undefined,
+    landmarkErrorMean: average(accumulator.jointErrors),
+    wristNoseCellAgreement: ratio(accumulator.wristNoseCellMatches, accumulator.wristNoseCellComparisons),
+    bodyGridCellAgreement: ratio(accumulator.bodyGridCellMatches, accumulator.bodyGridCellComparisons),
+    intentPrecision: precision,
+    intentRecall: recall,
+    intentF1: harmonicMean(precision, recall),
+    transitionTimingMeanErrorMs: average(transitionTimingErrors(referenceTransitions, accumulator.transitions)),
+    emittedEventCount: accumulator.emittedEventCount,
+    matchedEventCount: accumulator.matchedEventCount,
+    falsePositiveEventCount: accumulator.falsePositiveEventCount,
+    falseNegativeEventCount: accumulator.falseNegativeEventCount,
+    falseRepeatedEventCount: accumulator.falseRepeatedEventCount
+  };
+}
+
+/**
+ * Positive deltas mean treatment is better except emittedEventCount, which is
+ * reported as the raw treatment-minus-control cardinality change.
+ * @param {PoseTraceLaneMetrics} control
+ * @param {PoseTraceLaneMetrics} treatment
+ * @returns {PoseTraceOracleDeltas}
+ */
+function compareOracleLanes(control, treatment) {
+  return {
+    landmarkErrorP50: subtractOptional(control.landmarkErrorP50, treatment.landmarkErrorP50),
+    landmarkErrorP95: subtractOptional(control.landmarkErrorP95, treatment.landmarkErrorP95),
+    landmarkErrorMax: subtractOptional(control.landmarkErrorMax, treatment.landmarkErrorMax),
+    landmarkErrorMean: subtractOptional(control.landmarkErrorMean, treatment.landmarkErrorMean),
+    landmarkMeanErrorReductionRatio: control.landmarkErrorMean && treatment.landmarkErrorMean !== undefined
+      ? (control.landmarkErrorMean - treatment.landmarkErrorMean) / control.landmarkErrorMean
+      : undefined,
+    wristNoseCellAgreement: subtractOptional(treatment.wristNoseCellAgreement, control.wristNoseCellAgreement),
+    bodyGridCellAgreement: subtractOptional(treatment.bodyGridCellAgreement, control.bodyGridCellAgreement),
+    intentPrecision: subtractOptional(treatment.intentPrecision, control.intentPrecision),
+    intentRecall: subtractOptional(treatment.intentRecall, control.intentRecall),
+    intentF1: subtractOptional(treatment.intentF1, control.intentF1),
+    transitionTimingMeanErrorMs: subtractOptional(control.transitionTimingMeanErrorMs, treatment.transitionTimingMeanErrorMs),
+    emittedEventCount: treatment.emittedEventCount - control.emittedEventCount,
+    matchedEventCount: treatment.matchedEventCount - control.matchedEventCount,
+    falsePositiveEventCount: control.falsePositiveEventCount - treatment.falsePositiveEventCount,
+    falseNegativeEventCount: control.falseNegativeEventCount - treatment.falseNegativeEventCount,
+    falseRepeatedEventCount: control.falseRepeatedEventCount - treatment.falseRepeatedEventCount
+  };
+}
+
+/**
+ * @param {Partial<PoseTraceOracleThresholds> | undefined} requested
+ * @returns {PoseTraceOracleThresholds}
+ */
+function resolveOracleThresholds(requested) {
+  return {
+    minimumLandmarkMeanErrorReductionRatio: boundedThreshold(requested?.minimumLandmarkMeanErrorReductionRatio, defaultPoseTraceOracleThresholds.minimumLandmarkMeanErrorReductionRatio, 0, 1),
+    maximumLandmarkP95Regression: boundedThreshold(requested?.maximumLandmarkP95Regression, defaultPoseTraceOracleThresholds.maximumLandmarkP95Regression, 0, 1),
+    minimumIntentF1Delta: boundedThreshold(requested?.minimumIntentF1Delta, defaultPoseTraceOracleThresholds.minimumIntentF1Delta, 0, 1),
+    minimumIntentRecallDelta: boundedThreshold(requested?.minimumIntentRecallDelta, defaultPoseTraceOracleThresholds.minimumIntentRecallDelta, 0, 1),
+    minimumTreatmentIntentRecall: boundedThreshold(requested?.minimumTreatmentIntentRecall, defaultPoseTraceOracleThresholds.minimumTreatmentIntentRecall, 0, 1),
+    minimumGridAgreementDelta: boundedThreshold(requested?.minimumGridAgreementDelta, defaultPoseTraceOracleThresholds.minimumGridAgreementDelta, 0, 1),
+    maximumIntentPrecisionLoss: boundedThreshold(requested?.maximumIntentPrecisionLoss, defaultPoseTraceOracleThresholds.maximumIntentPrecisionLoss, 0, 1),
+    maximumFalsePositiveIncrease: boundedThreshold(requested?.maximumFalsePositiveIncrease, defaultPoseTraceOracleThresholds.maximumFalsePositiveIncrease, 0, Number.MAX_SAFE_INTEGER),
+    maximumFalseRepeatedEvents: boundedThreshold(requested?.maximumFalseRepeatedEvents, defaultPoseTraceOracleThresholds.maximumFalseRepeatedEvents, 0, Number.MAX_SAFE_INTEGER),
+    minimumTreatmentPredictionCoverage: boundedThreshold(requested?.minimumTreatmentPredictionCoverage, defaultPoseTraceOracleThresholds.minimumTreatmentPredictionCoverage, 0, 1),
+    maximumTransitionTimingRegressionMs: boundedThreshold(requested?.maximumTransitionTimingRegressionMs, defaultPoseTraceOracleThresholds.maximumTransitionTimingRegressionMs, 0, Number.MAX_SAFE_INTEGER),
+    maximumTreatmentTransitionTimingMeanErrorMs: boundedThreshold(requested?.maximumTreatmentTransitionTimingMeanErrorMs, defaultPoseTraceOracleThresholds.maximumTreatmentTransitionTimingMeanErrorMs, 0, Number.MAX_SAFE_INTEGER)
+  };
+}
+
+/**
+ * @param {PoseTraceLaneMetrics} control
+ * @param {PoseTraceLaneMetrics} treatment
+ * @param {PoseTraceOracleDeltas} deltas
+ * @param {number | undefined} coverage
+ * @param {PoseTraceOracleThresholds} thresholds
+ */
+function oraclePassesThresholds(control, treatment, deltas, coverage, thresholds) {
+  return deltas.landmarkMeanErrorReductionRatio !== undefined
+    && deltas.landmarkMeanErrorReductionRatio >= thresholds.minimumLandmarkMeanErrorReductionRatio
+    && deltas.landmarkErrorP95 !== undefined
+    && deltas.landmarkErrorP95 >= -thresholds.maximumLandmarkP95Regression
+    && deltas.intentF1 !== undefined
+    && deltas.intentF1 >= thresholds.minimumIntentF1Delta
+    && deltas.intentRecall !== undefined
+    && deltas.intentRecall >= thresholds.minimumIntentRecallDelta
+    && treatment.intentRecall !== undefined
+    && treatment.intentRecall >= thresholds.minimumTreatmentIntentRecall
+    && deltas.bodyGridCellAgreement !== undefined
+    && deltas.bodyGridCellAgreement >= thresholds.minimumGridAgreementDelta
+    && deltas.intentPrecision !== undefined
+    && deltas.intentPrecision >= -thresholds.maximumIntentPrecisionLoss
+    && treatment.falsePositiveEventCount - control.falsePositiveEventCount <= thresholds.maximumFalsePositiveIncrease
+    && treatment.falseRepeatedEventCount <= thresholds.maximumFalseRepeatedEvents
+    && coverage !== undefined
+    && coverage >= thresholds.minimumTreatmentPredictionCoverage
+    && (deltas.transitionTimingMeanErrorMs === undefined
+      || deltas.transitionTimingMeanErrorMs >= -thresholds.maximumTransitionTimingRegressionMs)
+    && treatment.transitionTimingMeanErrorMs !== undefined
+    && treatment.transitionTimingMeanErrorMs <= thresholds.maximumTreatmentTransitionTimingMeanErrorMs;
+}
+
+/** @param {number | undefined} first @param {number | undefined} second */
+function subtractOptional(first, second) {
+  return first === undefined || second === undefined ? undefined : first - second;
+}
+
+/** @param {number | undefined} first @param {number | undefined} second */
+function harmonicMean(first, second) {
+  if (first === undefined || second === undefined) {
+    return undefined;
+  }
+  return first + second > 0 ? (2 * first * second) / (first + second) : 0;
+}
+
+/** @param {number | undefined} value @param {number} fallback @param {number} minimum @param {number} maximum */
+function boundedThreshold(value, fallback, minimum, maximum) {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.min(maximum, Math.max(minimum, value))
+    : fallback;
 }
 
 /**
