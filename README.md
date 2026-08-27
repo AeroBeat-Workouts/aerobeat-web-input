@@ -10,9 +10,11 @@ It does not own camera permissions, CV model selection, vendor adapters, UI comp
 
 ## Public API Surface
 
-- `src/index.js` exports input source names, event routing constants, and a skeleton input router factory.
-- `createPoseInputRouter()` accepts normalized pose frames and can later emit Boxing and Flow events defined by `@aerobeat/web-contracts`.
-- The first testbed posture must support live, video, and replay feeds driving the same router.
+- `src/index.js` exports input source names, event routing constants, the input router, bounded two-measurement predictor, and held-out measured-trace oracle.
+- `createPoseInputRouter()` preserves legacy `routePoseFrame()` event objects exactly. Its enriched `routePoseSample()` path emits straight pulses once per measurement lineage and state/cell intents only on semantic transition. `routePoseSampleBatch()` routes both modes while counting one source sample once.
+- `createPosePredictor()` requires two fresh complete, visible measurements after every reset, advances a route generation on reset, accepts only `0 < horizon <= 125ms`, clamps coordinates/displacement, decays confidence, and resets/suppresses on source, time, visibility, staleness, or direction discontinuities.
+- `evaluateHeldOutPoseTrace()` down-samples a full measured trace and compares the actual stateful treatment with a matching stateful reference, reporting bounded landmark, grid-cell, event-agreement, timing, and erroneous-repeat metrics. These are scoring-readiness proxies only: this workspace has no gameplay scorer.
+- Live, video, and replay feeds drive the same router boundary.
 
 ## Adjacent Repos
 
