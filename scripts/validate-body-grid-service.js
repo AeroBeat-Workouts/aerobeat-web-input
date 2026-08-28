@@ -204,7 +204,25 @@ assert.ok(snapshot.latestEvidence?.activeBoxingActions.includes("straight_left")
 assert.ok(snapshot.latestEvidence?.activeBoxingActions.includes("straight_right"));
 assert.ok(snapshot.straightQualifications.every((item) => item.semanticQualified));
 assert.ok(snapshot.straightQualifications.every((item) => item.spatialQualified));
-assert.equal(service.getFreshEvidence(11850), snapshot.latestEvidence);
+const mainStraightEvidence = snapshot.latestEvidence;
+
+const independentStraight = createAeroBodyGridService({ calibrationIdPrefix: "straight-independent" });
+calibrate(independentStraight, 0);
+for (let at = 4250; at <= 8250; at += 250) {
+  independentStraight.processPoseSample(pose(at, releasedChanges));
+}
+for (const at of [8500, 8650, 8750]) {
+  snapshot = independentStraight.processPoseSample(pose(at, {
+    left_shoulder: { x: 0.85, y: 0.5 }, left_elbow: { x: 0.8, y: 0.5 }, left_wrist: { x: 0.75, y: 0.5 },
+    right_elbow: { x: 0.39, y: 0.52 }, right_wrist: { x: 0.44, y: 0.55 }
+  }));
+}
+const independentLeft = snapshot.straightQualifications.find((item) => item.hand === "left");
+assert.equal(independentLeft?.semanticQualified, true, "an exact 150ms gap preserves semantic continuity");
+assert.equal(independentLeft?.spatialQualified, false, "semantic straight is independent of accepted spatial subcolumns");
+assert.ok(snapshot.latestEvidence?.activeBoxingActions.includes("straight_left"));
+
+assert.equal(service.getFreshEvidence(11850), mainStraightEvidence);
 assert.equal(service.getFreshEvidence(11851), null, "checkpoint freshness is capped at 150ms");
 snapshot = service.processPoseSample(pose(11860, {
   left_shoulder: { x: 0.62, y: 0.5 }, left_elbow: { x: 0.59, y: 0.5 }, left_wrist: { x: 0.56, y: 0.5 },
