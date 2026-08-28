@@ -93,7 +93,8 @@ let bodyGridInstanceSequence = 0;
  *   padding?: Partial<AeroBodyGridPadding>,
  *   hysteresisRatio?: number,
  *   historyCapacity?: number,
- *   calibrationIdPrefix?: string
+ *   calibrationIdPrefix?: string,
+ *   onListenerError?: (error: unknown) => void
  * }} [options] Service options.
  * @returns {AeroBodyGridService} Service.
  */
@@ -103,6 +104,7 @@ export function createAeroBodyGridService(options = {}) {
   const hysteresisRatio = bounded(options.hysteresisRatio, 0.025, 0, 0.2);
   const historyCapacity = Math.max(8, Math.trunc(positive(options.historyCapacity, 120)));
   const instanceId = options.calibrationIdPrefix ?? `body-grid-${++bodyGridInstanceSequence}`;
+  const onListenerError = typeof options.onListenerError === "function" ? options.onListenerError : null;
   /** @type {Set<(snapshot: AeroBodyGridServiceSnapshot) => void>} */
   const listeners = new Set();
   /** @type {AeroGameplayEvidenceSnapshot[]} */
@@ -131,6 +133,7 @@ export function createAeroBodyGridService(options = {}) {
   let timestampMs = 0;
   let lossStartedAt = /** @type {number | null} */ (null);
   let lastMeasuredAt = /** @type {number | null} */ (null);
+  let lastMeasuredSourceFrameKey = /** @type {string | null} */ (null);
   let lossDurationMs = 0;
   let allRequiredAnchorsVisible = false;
   let trackingPaused = false;
@@ -199,10 +202,25 @@ export function createAeroBodyGridService(options = {}) {
   /** @returns {AeroBodyGridServiceSnapshot} */
   function publish() {
     latestSnapshot = buildSnapshot();
-    for (const listener of listeners) {
-      listener(latestSnapshot);
+    for (const listener of [...listeners]) {
+      notifyListener(listener, latestSnapshot);
     }
     return latestSnapshot;
+  }
+
+  /** @param {(snapshot: AeroBodyGridServiceSnapshot) => void} listener @param {AeroBodyGridServiceSnapshot} snapshot */
+  function notifyListener(listener, snapshot) {
+    try {
+      listener(snapshot);
+    } catch (error) {
+      if (onListenerError !== null) {
+        try {
+          onListenerError(error);
+        } catch {
+          // Observer diagnostics must not break calibrated input processing.
+        }
+      }
+    }
   }
 
   /** @param {string} reason */
@@ -234,13 +252,28 @@ export function createAeroBodyGridService(options = {}) {
       return latestSnapshot;
     }
     const sample = normalizeSample(input);
+    if (sample === null) {
+      return latestSnapshot;
+    }
     if (sample.provenance === "predicted") {
       predictedSampleCount += 1;
       latestPredictedTimestamp = sample.targetTimestampMs;
       return publish();
     }
+    if (
+      (lastMeasuredAt !== null && sample.measurementTimestampMs <= lastMeasuredAt) ||
+      `${sample.sourceId}\u0000${sample.measuredSourceFrameId}` === lastMeasuredSourceFrameKey
+    ) {
+      return latestSnapshot;
+    }
+    if (lastMeasuredAt !== null && sample.measurementTimestampMs - lastMeasuredAt >= calibrationDefaults.trackingLossPauseMs) {
+      lossStartedAt = lastMeasuredAt;
+      lossDurationMs = sample.measurementTimestampMs - lastMeasuredAt;
+      triggerTrackingPause(sample.measurementTimestampMs);
+    }
     timestampMs = Math.max(timestampMs, sample.measurementTimestampMs);
     lastMeasuredAt = sample.measurementTimestampMs;
+    lastMeasuredSourceFrameKey = `${sample.sourceId}\u0000${sample.measuredSourceFrameId}`;
     const nextAspect = positive(context.sourceAspectRatio, sourceAspect);
     const nextSourceIdentity = `media:${context.sourceChangeId ?? ""}|pose:${sample.sourceId}|mirror:${sample.mirrored ? "1" : "0"}|aspect:${nextAspect}`;
     if (sourceIdentity === null) {
@@ -513,8 +546,10 @@ export function createAeroBodyGridService(options = {}) {
   function resetMeasuredHistories() {
     anchorHistory.clear();
     resetStraightStates();
+    latestAnchors = [];
     latestEntries = [];
     latestEvidence = null;
+    evidenceHistory.length = 0;
   }
 
   /** @param {number} nextTimestamp */
@@ -586,44 +621,90 @@ export function createAeroBodyGridService(options = {}) {
       return latestSnapshot;
     },
     subscribe(listener) {
-      if (destroyed) {
+      if (destroyed || typeof listener !== "function") {
         return () => {};
       }
       listeners.add(listener);
-      listener(latestSnapshot);
+      notifyListener(listener, latestSnapshot);
       return () => listeners.delete(listener);
     },
     destroy
   };
 }
 
-/** @param {AeroPoseRoutingSample | NormalizedPoseFrame} input @returns {AeroPoseRoutingSample} */
+/** @param {AeroPoseRoutingSample | NormalizedPoseFrame} input @returns {AeroPoseRoutingSample | null} */
 function normalizeSample(input) {
-  if ("provenance" in input) {
-    return input;
+  try {
+    if (input === null || typeof input !== "object") {
+      return null;
+    }
+    if ("provenance" in input) {
+      if (
+        (input.provenance !== "measured" && input.provenance !== "predicted") ||
+        !isNonEmptyString(input.sourceId) ||
+        !isNonEmptyString(input.measuredSourceFrameId) ||
+        !isNonNegativeFinite(input.measurementTimestampMs) ||
+        !isNonNegativeFinite(input.targetTimestampMs) ||
+        !Array.isArray(input.landmarks) ||
+        typeof input.mirrored !== "boolean"
+      ) {
+        return null;
+      }
+      return input;
+    }
+    if (
+      !isNonEmptyString(input.sourceId) ||
+      !isNonNegativeFinite(input.timestampMs) ||
+      !Array.isArray(input.landmarks) ||
+      typeof input.mirrored !== "boolean"
+    ) {
+      return null;
+    }
+    return {
+      schema: "aerobeat/pose_routing_sample",
+      version: 1,
+      sourceId: input.sourceId,
+      routeEpoch: "measured-frame",
+      measuredSourceFrameId: `measured-frame:${input.sourceId}:${input.timestampMs}`,
+      targetTimestampMs: input.timestampMs,
+      measurementTimestampMs: input.timestampMs,
+      predictionHorizonMs: 0,
+      provenance: "measured",
+      landmarks: input.landmarks,
+      mirrored: input.mirrored
+    };
+  } catch {
+    return null;
   }
-  return {
-    schema: "aerobeat/pose_routing_sample",
-    version: 1,
-    sourceId: input.sourceId,
-    routeEpoch: "measured-frame",
-    measuredSourceFrameId: `measured-frame:${input.sourceId}:${input.timestampMs}`,
-    targetTimestampMs: input.timestampMs,
-    measurementTimestampMs: input.timestampMs,
-    predictionHorizonMs: 0,
-    provenance: "measured",
-    landmarks: input.landmarks,
-    mirrored: input.mirrored
-  };
 }
 
 /** @param {AeroPoseRoutingSample} sample @returns {Map<string, NormalizedPoseLandmark>} */
 function measuredLandmarkMap(sample) {
+  /** @type {Map<string, NormalizedPoseLandmark>} */
   const map = new Map();
-  for (const landmark of sample.landmarks) {
-    if (upperBodyAnchorNames.includes(/** @type {AeroUpperBodyAnchorName} */ (landmark.name))) {
-      map.set(landmark.name, landmark);
+  const rejectedNames = new Set();
+  for (const candidate of sample.landmarks) {
+    if (candidate === null || typeof candidate !== "object") {
+      continue;
     }
+    const name = candidate.name;
+    if (!upperBodyAnchorNames.includes(/** @type {AeroUpperBodyAnchorName} */ (name)) || rejectedNames.has(name)) {
+      continue;
+    }
+    if (map.has(name)) {
+      map.delete(name);
+      rejectedNames.add(name);
+      continue;
+    }
+    if (
+      !Number.isFinite(candidate.x) ||
+      !Number.isFinite(candidate.y) ||
+      !isNormalized(candidate.confidence)
+    ) {
+      rejectedNames.add(name);
+      continue;
+    }
+    map.set(name, /** @type {NormalizedPoseLandmark} */ (candidate));
   }
   return map;
 }
@@ -737,7 +818,7 @@ function hystereticGridCell(point, descriptor, previous, margin) {
 function cardinalDirection(from, to) {
   const dx = to.x - from.x;
   const dy = to.y - from.y;
-  if (Math.abs(dx) >= Math.abs(dy)) {
+  if (Math.abs(dx) + Number.EPSILON * 8 >= Math.abs(dy)) {
     return dx >= 0 ? "right" : "left";
   }
   return dy >= 0 ? "down" : "up";
@@ -829,6 +910,21 @@ function bounded(value, fallback, minimum, maximum) {
 /** @param {number} value */
 function clamp01(value) {
   return Math.min(1, Math.max(0, value));
+}
+
+/** @param {unknown} value */
+function isNonEmptyString(value) {
+  return typeof value === "string" && value.length > 0;
+}
+
+/** @param {unknown} value */
+function isNonNegativeFinite(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+/** @param {unknown} value */
+function isNormalized(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 }
 
 /** @template T @param {T} value @returns {Readonly<T>} */

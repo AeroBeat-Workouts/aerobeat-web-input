@@ -28,7 +28,7 @@ The public 4x3 and 8x6 contracts use athlete-space top-left row-major IDs. A sma
 
 Production gates come from `@aerobeat/web-contracts`: seven anchors individually at confidence 0.5, wrist/elbow shoulder-relative vertical ratio at most 0.35, both elbow angles at least 130 degrees, 4000ms hold, 4000ms cooldown, release before refire, and 500ms sustained tracking loss. There is no bootstrap or persistence. Source ID, media source-change ID, mirror flag, or source aspect change invalidates scoring and retains old geometry only as a dim reference until atomic replacement.
 
-Every tracking pause clears measured scoring evidence, freezes countdown participation, and requires a fresh calibration. Predicted samples are counted only in separate diagnostics. They never advance calibration, tracking visibility, cell history, straight continuity, or gameplay evidence.
+Every tracking pause clears measured anchors, scoring evidence/history, freezes countdown participation, and requires a fresh calibration. A gap of 500ms between measured samples is treated as no-frame loss even when the host did not call the explicit clock-advance hook. Timestamp rollback, duplicate source frames, duplicate required landmark names, non-finite coordinates, and out-of-range confidence cannot rewrite measured truth. Predicted samples are counted only in separate diagnostics. They never advance calibration, tracking visibility, cell history, straight continuity, or gameplay evidence.
 
 ## Boxing evidence
 

@@ -19,7 +19,7 @@ const server = createServer(async (request, response) => {
         const names = ["nose","left_shoulder","right_shoulder","left_elbow","right_elbow","left_wrist","right_wrist"];
         const points = {nose:[.5,.3],left_shoulder:[.6,.4],right_shoulder:[.4,.4],left_elbow:[.7,.4],right_elbow:[.3,.4],left_wrist:[.8,.4],right_wrist:[.2,.4]};
         const service = createAeroBodyGridService({calibrationIdPrefix:"browser"});
-        for (const timestampMs of [0,1000,2000,3000,4000]) service.processPoseSample({sourceId:"browser-camera",timestampMs,mirrored:true,landmarks:names.map(name=>({name,x:points[name][0],y:points[name][1],confidence:.95}))});
+        for (let timestampMs = 0; timestampMs <= 4000; timestampMs += 250) service.processPoseSample({sourceId:"browser-camera",timestampMs,mirrored:true,landmarks:names.map(name=>({name,x:points[name][0],y:points[name][1],confidence:.95}))});
         const snapshot = service.getSnapshot();
         document.querySelector("#result").textContent = JSON.stringify({id:snapshot.calibration.calibrationId,state:snapshot.calibration.state,frozen:Object.isFrozen(snapshot),grid:snapshot.calibration.grid.id});
       </script></body></html>`);

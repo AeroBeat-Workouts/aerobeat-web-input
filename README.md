@@ -28,7 +28,8 @@ The prior viewport-clamped bucketing path is removed. Legacy draft routing now u
 - Pose release is required before refire.
 - Source/media identity, mirror, or source-aspect changes invalidate scoring.
 - Old bounds remain only as dim display geometry during loss/recalibration and are atomically replaced.
-- Sustained loss for 500ms pauses, clears evidence, freezes countdown participation, and requires fresh calibration.
+- Sustained measured-anchor loss or a 500ms no-frame gap pauses, clears anchors/evidence/history, freezes countdown participation, and requires fresh calibration.
+- Malformed, duplicate-anchor, duplicate-frame, and timestamp-rollback input cannot mutate scoring truth; one failing subscriber cannot interrupt other subscribers or pose processing.
 
 The source owns preview mirroring. Input applies exactly one public transform: camera `(x,y)` becomes athlete `(1-x,y)`. The calibrated grid is top-left row-major (`0..11`) with an 8x6 subgrid (`0..47`). Mapping never clamps; out-of-grid anchors preserve raw diagnostics and expose null scoring cells.
 
