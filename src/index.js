@@ -1,5 +1,13 @@
 // @ts-check
 
+import {
+  athleteBodyGrid4x3,
+  cameraPreviewToAthlete,
+  normalizedPointToGridCell
+} from "@aerobeat/web-contracts";
+
+export * from "./body-grid-service.js";
+
 /** @type {"aero.input.router"} */
 export const aeroInputRouterServiceId = "aero.input.router";
 
@@ -919,7 +927,10 @@ function routeLegacyFlowFrame(frame) {
     if (!landmark || landmark.confidence < 0.5) {
       continue;
     }
-    const cell = toBodyGridCell(landmark);
+    const cell = toAthleteBodyGridCell(landmark);
+    if (!cell) {
+      continue;
+    }
     events.push({
       schema: "aero.input.draft",
       version: 1,
@@ -1011,7 +1022,11 @@ function routeStatefulFlowSample(sample, semanticStates) {
       states.delete(anchor);
       continue;
     }
-    const cell = toBodyGridCell(landmark);
+    const cell = toAthleteBodyGridCell(landmark);
+    if (!cell) {
+      states.delete(anchor);
+      continue;
+    }
     const kind = anchor === "nose" && landmark.y > 0.5 ? "squat_enabled" : "cell_entered";
     const signature = `${kind}:${cell.column}:${cell.row}`;
     if (states.get(anchor) === signature) {
@@ -1206,19 +1221,21 @@ function meanJointError(predicted, measured) {
   return average(errors) ?? 0;
 }
 
-/** @param {NormalizedPoseLandmark} landmark */
-function toBodyGridCell(landmark) {
-  return {
-    column: clampIndex(Math.floor(clamp01(landmark.x) * 4), 4),
-    row: clampIndex(Math.floor(clamp01(landmark.y) * 3), 3)
-  };
+/**
+ * Legacy router compatibility now uses the public athlete-space transform and
+ * no-clamp grid contract rather than the retired viewport bucketing path.
+ * @param {NormalizedPoseLandmark} landmark
+ * @returns {import("@aerobeat/web-contracts").AeroGridCellRef | null}
+ */
+function toAthleteBodyGridCell(landmark) {
+  return normalizedPointToGridCell(cameraPreviewToAthlete(landmark), athleteBodyGrid4x3);
 }
 
 /** @param {NormalizedPoseLandmark} first @param {NormalizedPoseLandmark} second */
 function sameCell(first, second) {
-  const a = toBodyGridCell(first);
-  const b = toBodyGridCell(second);
-  return a.column === b.column && a.row === b.row;
+  const a = toAthleteBodyGridCell(first);
+  const b = toAthleteBodyGridCell(second);
+  return a !== null && b !== null && a.column === b.column && a.row === b.row;
 }
 
 /** @param {number[]} values @param {number} value */
@@ -1251,11 +1268,6 @@ function ratio(numerator, denominator) {
 /** @param {number} value */
 function clamp01(value) {
   return Math.min(1, Math.max(0, value));
-}
-
-/** @param {number} value @param {number} size */
-function clampIndex(value, size) {
-  return Math.min(size - 1, Math.max(0, value));
 }
 
 /** @param {number | undefined} value @param {number} fallback */

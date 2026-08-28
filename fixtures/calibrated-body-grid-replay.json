@@ -1,0 +1,24 @@
+{
+  "schema": "aerobeat.input.body-grid-replay.v1",
+  "description": "Deterministic metadata-only replay recipe used by the body-grid validator; no camera frames or pixels.",
+  "source": {
+    "sourceId": "fixture-camera",
+    "sourceAspectRatio": 1.7777777777777777,
+    "mirrored": true
+  },
+  "timeline": [
+    { "atMs": 0, "pose": "t_pose" },
+    { "atMs": 1000, "pose": "t_pose" },
+    { "atMs": 2000, "pose": "t_pose" },
+    { "atMs": 3000, "pose": "t_pose" },
+    { "atMs": 4000, "pose": "t_pose", "expectCalibration": "captured" },
+    { "atMs": 4100, "pose": "released" },
+    { "atMs": 8100, "pose": "ready" },
+    { "atMs": 8200, "pose": "left_straight" },
+    { "atMs": 8250, "pose": "left_straight" },
+    { "atMs": 8300, "pose": "left_straight", "expectSemantic": "straight_left" },
+    { "atMs": 8400, "pose": "guard_squat", "expectSemantic": ["guard", "squat"] },
+    { "atMs": 8500, "pose": "right_wrist_lost" },
+    { "atMs": 9000, "pose": "right_wrist_lost", "expectSafety": "paused_tracking" }
+  ]
+}

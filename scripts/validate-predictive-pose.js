@@ -71,21 +71,21 @@ const expectedFlow = [
     version: 1,
     mode: "flow",
     eventName: "aero:input:flow-intent",
-    detail: { kind: "cell_entered", anchor: "left_wrist", column: 0, row: 1, timestampMs: 100, confidence: 0.9 }
+    detail: { kind: "cell_entered", anchor: "left_wrist", column: 3, row: 1, timestampMs: 100, confidence: 0.9 }
   },
   {
     schema: "aero.input.draft",
     version: 1,
     mode: "flow",
     eventName: "aero:input:flow-intent",
-    detail: { kind: "cell_entered", anchor: "right_wrist", column: 0, row: 1, timestampMs: 100, confidence: 0.9 }
+    detail: { kind: "cell_entered", anchor: "right_wrist", column: 3, row: 1, timestampMs: 100, confidence: 0.9 }
   },
   {
     schema: "aero.input.draft",
     version: 1,
     mode: "flow",
     eventName: "aero:input:flow-intent",
-    detail: { kind: "cell_entered", anchor: "nose", column: 0, row: 1, timestampMs: 100, confidence: 0.9 }
+    detail: { kind: "cell_entered", anchor: "nose", column: 3, row: 1, timestampMs: 100, confidence: 0.9 }
   }
 ];
 assert.deepEqual(createPoseInputDraftEvents(legacyFrame, "boxing"), expectedBoxing);
