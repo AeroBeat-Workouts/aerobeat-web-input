@@ -462,6 +462,17 @@ assert.doesNotThrow(() => listenerService.processPoseSample(pose(0)));
 assert.equal(listenerErrors, 2, "immediate and published listener errors are isolated");
 assert.equal(healthyListenerCalls, 2, "one bad observer cannot starve later observers");
 
+const isolatedA = createAeroBodyGridService({ calibrationIdPrefix: "isolated-a" });
+const isolatedB = createAeroBodyGridService({ calibrationIdPrefix: "isolated-b" });
+calibrate(isolatedA, 0);
+calibrate(isolatedB, 0);
+isolatedA.resetCalibration("instance-a-only");
+assert.equal(isolatedA.getSnapshot().tracking.gameplayPaused, true);
+assert.equal(isolatedB.getSnapshot().calibration.calibrationId, "isolated-b-1");
+isolatedA.destroy();
+assert.equal(isolatedA.getSnapshot().calibration.readiness, "destroyed");
+assert.notEqual(isolatedB.processPoseSample(pose(4250, releasedChanges)).calibration.readiness, "destroyed", "destroy/reconnect state is per instance");
+
 // Ordinary visible movement cannot bootstrap calibration.
 const noBootstrap = createAeroBodyGridService({ calibrationIdPrefix: "none" });
 for (let at = 0; at <= 10000; at += 1000) {
