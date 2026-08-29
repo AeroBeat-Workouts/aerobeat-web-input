@@ -441,19 +441,18 @@ export function createAeroBodyGridService(options = {}) {
         const direction = name === "nose"
           ? cardinalDirection(history.point, raw)
           : rollingWristDirection(name === "left_wrist" ? "left" : "right", sample.measurementTimestampMs);
-        if (direction !== null) {
-          entries.push({
-            schema: "aerobeat/body_grid_cell_entry",
-            version: 1,
-            anchor: name,
-            calibrationId,
-            measurementTimestampMs: sample.measurementTimestampMs,
-            fromCell: history.cell.id,
-            toCell: cell.id,
-            direction,
-            provenance: "measured"
-          });
-        }
+        const entry = {
+          schema: /** @type {const} */ ("aerobeat/body_grid_cell_entry"),
+          version: /** @type {const} */ (1),
+          anchor: name,
+          calibrationId,
+          measurementTimestampMs: sample.measurementTimestampMs,
+          fromCell: history.cell.id,
+          toCell: cell.id
+        };
+        entries.push(direction === null
+          ? { ...entry, provenance: "measured" }
+          : { ...entry, direction, provenance: "measured" });
       }
       anchorHistory.set(name, {
         point: inGrid ? raw : null,

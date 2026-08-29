@@ -40,7 +40,7 @@ Only real measurements can calibrate, advance tracking safety, emit cell entries
 Measured evidence supports:
 
 - bounded cell/subcell hysteresis and measured in-grid transitions;
-- per-wrist rolling shoulder-relative motion over a bounded tunable window, exact eight-way direction quantization, and a minimum-magnitude ambiguity gate;
+- every valid measured wrist cell transition, with per-wrist rolling shoulder-relative motion over a bounded tunable window attaching exact eight-way direction only above the minimum-magnitude ambiguity gate;
 - independent semantic and spatial straight continuity with 150ms gap reset;
 - semantic hook/uppercut observations;
 - same-sample standard/crossed guards;

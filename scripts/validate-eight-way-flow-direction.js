@@ -2,6 +2,7 @@
 
 import assert from "node:assert/strict";
 import { isBodyGridCellEntry } from "@aerobeat/web-contracts";
+import { createAeroGameplaySessionCoordinator } from "../../aerobeat-web-gameplay/src/index.js";
 import { createAeroBodyGridService } from "../src/index.js";
 
 const names = ["nose", "left_shoulder", "right_shoulder", "left_elbow", "right_elbow", "left_wrist", "right_wrist"];
@@ -79,6 +80,70 @@ function runLeftTransition(target, cadence, options = {}) {
   return entries;
 }
 
+const gameplayHash = "a".repeat(64);
+const flowVariant = Object.freeze({
+  variantId: "variant",
+  chartId: "chart-variant",
+  mode: "flow",
+  rulesetId: "flow_grid_v1",
+  recipeId: null,
+  modifierIds: Object.freeze([]),
+  ranked: false,
+  mapHash: Object.freeze({ schema: "aerobeat/content_hash", version: 1, algorithm: "sha256", value: gameplayHash }),
+  scoreIdentityHash: Object.freeze({ schema: "aerobeat/content_hash", version: 1, algorithm: "sha256", value: gameplayHash }),
+  provenance: Object.freeze({ baseVariantId: "variant" })
+});
+
+/** @param {string} eventId @param {number | undefined} direction */
+function flowEvent(eventId, direction) {
+  return Object.freeze({
+    schema: "aerobeat/resolved_content_event",
+    version: 1,
+    eventId,
+    variantId: "variant",
+    chartId: "chart-variant",
+    centerTimestampMs: 500,
+    sourceEventIds: Object.freeze([`source-${eventId}`]),
+    type: "note",
+    hand: "left",
+    placement: 6,
+    ...(direction === undefined ? {} : { direction })
+  });
+}
+
+/** @param {ReturnType<typeof createAeroGameplaySessionCoordinator>} coordinator @param {Readonly<Record<string, unknown>>} event */
+function readyGameplay(coordinator, event) {
+  coordinator.configureContent({
+    packageId: "package-1",
+    selectedVariant: flowVariant,
+    resolvedEvents: [event],
+    profileIdentity: { schema: "aerobeat/prototype_tuning_identity", version: 1, profileId: "profile", profileVersion: "1", contentHash: gameplayHash, class: "between_run_ruleset", regenerationRequired: false },
+    shadowVariants: []
+  });
+  const clock = { contextTimeSeconds: 0, positionSeconds: 0, playing: false };
+  const input = { calibration: { calibrationId: "cal-1", readiness: "countdown" }, tracking: { gameplayPaused: false, freshCalibrationRequired: false }, countdownFrozen: false, latestEvidence: null, straightQualifications: [] };
+  coordinator.advance({ timestampMs: 0, clock, input });
+  assert.equal(coordinator.requestStart(0).accepted, true);
+  for (const timestampMs of [1000, 2000, 3000]) coordinator.advance({ timestampMs, clock });
+  assert.equal(coordinator.getSnapshot().session.state, "playing");
+}
+
+/** @param {ReturnType<typeof createAeroGameplaySessionCoordinator>} coordinator @param {import("@aerobeat/web-contracts").AeroGameplayEvidenceSnapshot} evidence @param {number} positionMs */
+function judgeGameplay(coordinator, evidence, positionMs) {
+  coordinator.advance({
+    timestampMs: evidence.measurementTimestampMs,
+    clock: { contextTimeSeconds: positionMs / 1000, positionSeconds: positionMs / 1000, playing: true },
+    input: {
+      calibration: { calibrationId: evidence.calibrationId, readiness: "countdown" },
+      tracking: { gameplayPaused: false, freshCalibrationRequired: false },
+      countdownFrozen: false,
+      latestEvidence: evidence,
+      straightQualifications: []
+    }
+  });
+  return coordinator.getJudgements().map((entry) => [entry.result, entry.diagnostics]);
+}
+
 const octants = [
   ["up", { x: 0.375, y: 1 / 6 }],
   ["up-right", { x: 0.625, y: 1 / 6 }],
@@ -138,7 +203,10 @@ for (const [expected, target] of [
     service.processPoseSample(pose(at, handChanges({ left: { shoulder: translated, wrist } })));
   }
   assert.equal(service.getSnapshot().anchors.find((anchor) => anchor.anchor === "left_wrist")?.cell, 6);
-  assert.equal(service.getSnapshot().entries.some((entry) => entry.anchor === "left_wrist"), false, "shoulder translation does not invent wrist direction");
+  const entry = service.getSnapshot().entries.find((candidate) => candidate.anchor === "left_wrist");
+  assert.ok(entry, "shoulder translation preserves the measured cell transition");
+  assert.equal(Object.hasOwn(entry, "direction"), false, "shoulder translation does not invent wrist direction");
+  assert.ok(isBodyGridCellEntry(entry), "the directionless transition satisfies the shared contract");
 }
 
 // Both hands own independent rolling histories and can emit opposite diagonals in one measured frame.
@@ -157,15 +225,35 @@ for (const [expected, target] of [
   assert.equal(entries.find((entry) => entry.anchor === "right_wrist")?.direction, "down-left");
 }
 
-// Hysteresis can produce a tiny boundary crossing; the minimum motion gate rejects its ambiguous direction.
+// Hysteresis can produce a tiny boundary crossing. Preserve the entry for dot notes without fabricating direction.
 {
   const service = createAeroBodyGridService({ calibrationIdPrefix: "minimum", directionHistoryWindowMs: 40, directionMinimumMagnitude: 0.12 });
   ready(service);
+  let snapshot = service.getSnapshot();
+  /** @type {import("@aerobeat/web-contracts").AeroBodyGridCellEntry[]} */
+  const entries = [];
+  /** @type {import("@aerobeat/web-contracts").AeroGameplayEvidenceSnapshot | null} */
+  let transitionEvidence = null;
   for (const [at, x] of [[8400, 0.52], [8450, 0.52], [8500, 0.52], [8550, 0.526]]) {
-    service.processPoseSample(pose(at, handChanges({ left: { wrist: { x, y: 0.5 } } })));
+    snapshot = service.processPoseSample(pose(at, handChanges({ left: { wrist: { x, y: 0.5 } } })));
+    const wristEntries = snapshot.entries.filter((entry) => entry.anchor === "left_wrist");
+    entries.push(...wristEntries);
+    if (wristEntries.length > 0) transitionEvidence = snapshot.latestEvidence;
   }
-  assert.equal(service.getSnapshot().anchors.find((anchor) => anchor.anchor === "left_wrist")?.cell, 6);
-  assert.equal(service.getSnapshot().entries.some((entry) => entry.anchor === "left_wrist"), false, "sub-threshold motion emits no directional entry");
+  assert.equal(snapshot.anchors.find((anchor) => anchor.anchor === "left_wrist")?.cell, 6);
+  assert.equal(entries.length, 1, "sub-threshold movement emits exactly one measured cell entry");
+  assert.equal(Object.hasOwn(entries[0], "direction"), false, "ambiguous movement omits the direction property");
+  assert.ok(isBodyGridCellEntry(entries[0]), "the shared contract validates a directionless entry");
+  assert.equal(entries[0].provenance, "measured");
+  assert.ok(transitionEvidence);
+
+  const dot = createAeroGameplaySessionCoordinator({ sessionId: "directionless-dot" });
+  readyGameplay(dot, flowEvent("directionless-dot", undefined));
+  assert.deepEqual(judgeGameplay(dot, transitionEvidence, 500), [["hit", []]], "dot gameplay consumes the directionless entry");
+
+  const arrow = createAeroGameplaySessionCoordinator({ sessionId: "directionless-arrow" });
+  readyGameplay(arrow, flowEvent("directionless-arrow", 3));
+  assert.deepEqual(judgeGameplay(arrow, transitionEvidence, 681), [["miss", ["wrong_direction"]]], "arrow gameplay rejects missing directional evidence");
 }
 
 // Timestamp rollback discards rolling direction truth before the next accepted frame.
@@ -178,7 +266,9 @@ for (const [expected, target] of [
   service.processPoseSample(pose(8530, handChanges({ left: { wrist: { x: 0.6, y: 0.5 } } })));
   const snapshot = service.processPoseSample(pose(8580, handChanges({ left: { wrist: { x: 0.6, y: 0.5 } } })));
   assert.equal(snapshot.anchors.find((anchor) => anchor.anchor === "left_wrist")?.cell, 6);
-  assert.equal(snapshot.entries.some((entry) => entry.anchor === "left_wrist"), false, "rollback reset prevents stale direction reuse");
+  const entry = snapshot.entries.find((candidate) => candidate.anchor === "left_wrist");
+  assert.ok(entry, "rollback preserves the next measured cell transition");
+  assert.equal(Object.hasOwn(entry, "direction"), false, "rollback reset prevents stale direction reuse");
 }
 
 // Tracking invalidity clears both wrist histories; prediction never repopulates them.
