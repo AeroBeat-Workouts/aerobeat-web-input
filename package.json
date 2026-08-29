@@ -19,7 +19,7 @@
     "check:components": "node scripts/validate-component-rules.js",
     "check:console": "node scripts/validate-playwright-console-noise.js",
     "test": "npm run check && npm run test:unit",
-    "test:unit": "node scripts/validate-predictive-pose.js && node scripts/validate-body-grid-service.js",
+    "test:unit": "node scripts/validate-predictive-pose.js && node scripts/validate-body-grid-service.js && node scripts/validate-eight-way-flow-direction.js",
     "test:browser": "npm run check:console && node scripts/validate-body-grid-browser.js",
     "demo": "npm --prefix .testbed run demo",
     "testbed:serve": "npm --prefix .testbed run serve",

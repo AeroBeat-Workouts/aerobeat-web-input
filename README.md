@@ -39,7 +39,8 @@ Only real measurements can calibrate, advance tracking safety, emit cell entries
 
 Measured evidence supports:
 
-- bounded cell/subcell hysteresis and four-cardinal in-grid transitions;
+- bounded cell/subcell hysteresis and measured in-grid transitions;
+- per-wrist rolling shoulder-relative motion over a bounded tunable window, exact eight-way direction quantization, and a minimum-magnitude ambiguity gate;
 - independent semantic and spatial straight continuity with 150ms gap reset;
 - semantic hook/uppercut observations;
 - same-sample standard/crossed guards;
@@ -69,6 +70,6 @@ npm run test:browser
 npm pack --dry-run
 ```
 
-Validation covers predictive separation, T-pose gates/averaging/release/refire, aspect/padding, source/mirror identity, exact corners, no-clamp invalidity, hysteresis/cardinal entries, same-sample and overlapping Boxing evidence, measured straight continuity, freshness, sustained/no-frame tracking loss, reset/recalibration, immutable subscriptions, teardown, package contents, and Chromium import/calibration smoke.
+Validation covers predictive separation, T-pose gates/averaging/release/refire, aspect/padding, source/mirror identity, exact corners, no-clamp invalidity, hysteresis/cardinal nose entries, rolling eight-way wrist octants/cadence/smoothing/shoulder translation/ambiguity/resets, same-sample and overlapping Boxing evidence, measured straight continuity, freshness, sustained/no-frame tracking loss, reset/recalibration, immutable subscriptions, teardown, package contents, and Chromium import/calibration smoke.
 
 Repo decisions live under `docs/decisions/`; public contributor documentation belongs in `aerobeat-web-docs` after acceptance.

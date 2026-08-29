@@ -82,6 +82,7 @@ export const aeroBodyGridServiceId = "aero.input.body-grid";
 
 /** @typedef {{semanticStart: number | null, semanticLast: number | null, spatialStart: number | null, spatialLast: number | null}} StraightState */
 /** @typedef {{point: {x: number, y: number} | null, cell: import("@aerobeat/web-contracts").AeroGridCellRef | null, subcell: import("@aerobeat/web-contracts").AeroGridCellRef | null}} AnchorHistory */
+/** @typedef {{timestampMs: number, x: number, y: number}} WristMotionPoint */
 
 let bodyGridInstanceSequence = 0;
 
@@ -93,6 +94,8 @@ let bodyGridInstanceSequence = 0;
  *   padding?: Partial<AeroBodyGridPadding>,
  *   hysteresisRatio?: number,
  *   historyCapacity?: number,
+ *   directionHistoryWindowMs?: number,
+ *   directionMinimumMagnitude?: number,
  *   calibrationIdPrefix?: string,
  *   onListenerError?: (error: unknown) => void
  * }} [options] Service options.
@@ -103,6 +106,8 @@ export function createAeroBodyGridService(options = {}) {
   const padding = normalizePadding(options.padding);
   const hysteresisRatio = bounded(options.hysteresisRatio, 0.025, 0, 0.2);
   const historyCapacity = Math.max(8, Math.trunc(positive(options.historyCapacity, 120)));
+  const directionHistoryWindowMs = bounded(options.directionHistoryWindowMs, 180, 40, 500);
+  const directionMinimumMagnitude = bounded(options.directionMinimumMagnitude, 0.12, 0.01, 2);
   const instanceId = options.calibrationIdPrefix ?? `body-grid-${++bodyGridInstanceSequence}`;
   const onListenerError = typeof options.onListenerError === "function" ? options.onListenerError : null;
   /** @type {Set<(snapshot: AeroBodyGridServiceSnapshot) => void>} */
@@ -111,6 +116,11 @@ export function createAeroBodyGridService(options = {}) {
   const evidenceHistory = [];
   /** @type {Map<AeroUpperBodyAnchorName, AnchorHistory>} */
   const anchorHistory = new Map();
+  /** @type {Map<"left" | "right", WristMotionPoint[]>} */
+  const wristMotionHistories = new Map([
+    ["left", []],
+    ["right", []]
+  ]);
   /** @type {Map<"left" | "right", StraightState>} */
   const straightStates = new Map([
     ["left", emptyStraightState()],
@@ -260,8 +270,12 @@ export function createAeroBodyGridService(options = {}) {
       latestPredictedTimestamp = sample.targetTimestampMs;
       return publish();
     }
+    if (lastMeasuredAt !== null && sample.measurementTimestampMs < lastMeasuredAt) {
+      resetWristMotionHistories();
+      return latestSnapshot;
+    }
     if (
-      (lastMeasuredAt !== null && sample.measurementTimestampMs <= lastMeasuredAt) ||
+      (lastMeasuredAt !== null && sample.measurementTimestampMs === lastMeasuredAt) ||
       `${sample.sourceId}\u0000${sample.measuredSourceFrameId}` === lastMeasuredSourceFrameKey
     ) {
       return latestSnapshot;
@@ -295,6 +309,7 @@ export function createAeroBodyGridService(options = {}) {
       lossStartedAt ??= sample.measurementTimestampMs;
       lossDurationMs = Math.max(0, sample.measurementTimestampMs - lossStartedAt);
       latestEntries = [];
+      resetWristMotionHistories();
       if (lossDurationMs >= calibrationDefaults.trackingLossPauseMs) {
         triggerTrackingPause(sample.measurementTimestampMs);
       }
@@ -388,6 +403,11 @@ export function createAeroBodyGridService(options = {}) {
     const entries = [];
     /** @type {Map<AeroUpperBodyAnchorName, AeroBodyGridAnchorSnapshot>} */
     const byName = new Map();
+    if (scoringValid) {
+      recordWristMotionSamples(sample.measurementTimestampMs, landmarks, bounds);
+    } else {
+      resetWristMotionHistories();
+    }
     for (const name of upperBodyAnchorNames) {
       const landmark = landmarks.get(name);
       if (!landmark) {
@@ -418,17 +438,22 @@ export function createAeroBodyGridService(options = {}) {
       anchors.push(anchor);
       byName.set(name, anchor);
       if ((name === "nose" || name === "left_wrist" || name === "right_wrist") && inGrid && history.cell !== null && cell !== null && history.cell.id !== cell.id && history.point !== null) {
-        entries.push({
-          schema: "aerobeat/body_grid_cell_entry",
-          version: 1,
-          anchor: name,
-          calibrationId,
-          measurementTimestampMs: sample.measurementTimestampMs,
-          fromCell: history.cell.id,
-          toCell: cell.id,
-          direction: cardinalDirection(history.point, raw),
-          provenance: "measured"
-        });
+        const direction = name === "nose"
+          ? cardinalDirection(history.point, raw)
+          : rollingWristDirection(name === "left_wrist" ? "left" : "right", sample.measurementTimestampMs);
+        if (direction !== null) {
+          entries.push({
+            schema: "aerobeat/body_grid_cell_entry",
+            version: 1,
+            anchor: name,
+            calibrationId,
+            measurementTimestampMs: sample.measurementTimestampMs,
+            fromCell: history.cell.id,
+            toCell: cell.id,
+            direction,
+            provenance: "measured"
+          });
+        }
       }
       anchorHistory.set(name, {
         point: inGrid ? raw : null,
@@ -543,8 +568,72 @@ export function createAeroBodyGridService(options = {}) {
     resetStraightHand("right");
   }
 
+  /** @param {number} atTimestampMs @param {Map<string, NormalizedPoseLandmark>} landmarks @param {AeroCalibratedBounds} calibratedBounds */
+  function recordWristMotionSamples(atTimestampMs, landmarks, calibratedBounds) {
+    for (const hand of /** @type {const} */ (["left", "right"])) {
+      const wrist = landmarks.get(`${hand}_wrist`);
+      const shoulder = landmarks.get(`${hand}_shoulder`);
+      if (!wrist || !shoulder || wrist.confidence < calibrationDefaults.requiredConfidence || shoulder.confidence < calibrationDefaults.requiredConfidence) {
+        wristMotionHistories.set(hand, []);
+        continue;
+      }
+      const wristRaw = normalizeAgainstBounds(cameraPreviewToAthlete(wrist), calibratedBounds);
+      const shoulderRaw = normalizeAgainstBounds(cameraPreviewToAthlete(shoulder), calibratedBounds);
+      const history = wristMotionHistories.get(hand) ?? [];
+      history.push({
+        timestampMs: atTimestampMs,
+        x: (wristRaw.x - shoulderRaw.x) * athleteBodyGrid4x3.columns,
+        y: (wristRaw.y - shoulderRaw.y) * athleteBodyGrid4x3.rows
+      });
+      const cutoff = atTimestampMs - directionHistoryWindowMs;
+      while (history.length > 0 && history[0].timestampMs < cutoff) history.shift();
+      if (history.length > 64) history.splice(0, history.length - 64);
+      wristMotionHistories.set(hand, history);
+    }
+  }
+
+  /** @param {"left" | "right"} hand @param {number} atTimestampMs @returns {import("@aerobeat/web-contracts").AeroBodyGridDirection | null} */
+  function rollingWristDirection(hand, atTimestampMs) {
+    const history = (wristMotionHistories.get(hand) ?? []).filter((point) => point.timestampMs >= atTimestampMs - directionHistoryWindowMs && point.timestampMs <= atTimestampMs);
+    if (history.length < 2) return null;
+    const origin = history[0].timestampMs;
+    const elapsed = history.at(-1).timestampMs - origin;
+    if (elapsed <= 0) return null;
+    let meanTime = 0;
+    let meanX = 0;
+    let meanY = 0;
+    for (const point of history) {
+      meanTime += point.timestampMs - origin;
+      meanX += point.x;
+      meanY += point.y;
+    }
+    meanTime /= history.length;
+    meanX /= history.length;
+    meanY /= history.length;
+    let denominator = 0;
+    let numeratorX = 0;
+    let numeratorY = 0;
+    for (const point of history) {
+      const centeredTime = point.timestampMs - origin - meanTime;
+      denominator += centeredTime * centeredTime;
+      numeratorX += centeredTime * (point.x - meanX);
+      numeratorY += centeredTime * (point.y - meanY);
+    }
+    if (denominator <= Number.EPSILON) return null;
+    const dx = numeratorX / denominator * elapsed;
+    const dy = numeratorY / denominator * elapsed;
+    if (Math.hypot(dx, dy) < directionMinimumMagnitude) return null;
+    return eightWayDirection(dx, dy);
+  }
+
+  function resetWristMotionHistories() {
+    wristMotionHistories.set("left", []);
+    wristMotionHistories.set("right", []);
+  }
+
   function resetMeasuredHistories() {
     anchorHistory.clear();
+    resetWristMotionHistories();
     resetStraightStates();
     latestAnchors = [];
     latestEntries = [];
@@ -603,6 +692,7 @@ export function createAeroBodyGridService(options = {}) {
     latestEntries = [];
     holdFrames = [];
     anchorHistory.clear();
+    resetWristMotionHistories();
     evidenceHistory.length = 0;
     publish();
     listeners.clear();
@@ -814,7 +904,7 @@ function hystereticGridCell(point, descriptor, previous, margin) {
   return point.x >= left && point.x < right && point.y >= top && point.y < bottom ? previous : direct;
 }
 
-/** @param {{x: number, y: number}} from @param {{x: number, y: number}} to @returns {import("@aerobeat/web-contracts").AeroCardinalDirection} */
+/** @param {{x: number, y: number}} from @param {{x: number, y: number}} to @returns {import("@aerobeat/web-contracts").AeroBodyGridDirection} */
 function cardinalDirection(from, to) {
   const dx = to.x - from.x;
   const dy = to.y - from.y;
@@ -822,6 +912,14 @@ function cardinalDirection(from, to) {
     return dx >= 0 ? "right" : "left";
   }
   return dy >= 0 ? "down" : "up";
+}
+
+/** @param {number} dx @param {number} dy @returns {import("@aerobeat/web-contracts").AeroBodyGridDirection} */
+function eightWayDirection(dx, dy) {
+  const directions = /** @type {const} */ (["right", "down-right", "down", "down-left", "left", "up-left", "up", "up-right"]);
+  const angle = Math.atan2(dy, dx);
+  const sector = Math.floor((angle + Math.PI / 8 + Math.PI * 2) % (Math.PI * 2) / (Math.PI / 4));
+  return directions[sector];
 }
 
 /** @param {StraightState} state @param {"semanticStart" | "spatialStart"} startKey @param {"semanticLast" | "spatialLast"} lastKey @param {number} now @param {boolean} active */
