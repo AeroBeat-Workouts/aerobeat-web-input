@@ -85,7 +85,7 @@ const flowVariant = Object.freeze({
   variantId: "variant",
   chartId: "chart-variant",
   mode: "flow",
-  rulesetId: "flow_grid_v1",
+  rulesetId: "flow_grid_v2",
   recipeId: null,
   modifierIds: Object.freeze([]),
   ranked: false,
@@ -98,7 +98,7 @@ const flowVariant = Object.freeze({
 function flowEvent(eventId, direction) {
   return Object.freeze({
     schema: "aerobeat/resolved_content_event",
-    version: 1,
+    version: 3,
     eventId,
     variantId: "variant",
     chartId: "chart-variant",
