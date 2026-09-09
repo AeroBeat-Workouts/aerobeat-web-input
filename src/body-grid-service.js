@@ -23,6 +23,20 @@ import {
 /** @type {"aero.input.body-grid"} */
 export const aeroBodyGridServiceId = "aero.input.body-grid";
 
+const internalMeasuredNoseParallaxSymbol = Symbol.for("aerobeat.web-input.internal-measured-nose-parallax");
+const minimumParallaxHeadroom = 1e-6;
+
+/**
+ * @typedef {Readonly<{
+ *   calibrationId: string,
+ *   sourceIdentity: string,
+ *   measurementTimestampMs: number,
+ *   measuredSourceFrameId: string,
+ *   xDeflection: number,
+ *   yDeflection: number
+ * }>} InternalMeasuredNoseParallaxSample
+ */
+
 /**
  * @typedef {Object} AeroBodyGridPadding
  * @property {number} left Non-negative fraction of calibrated base width.
@@ -155,6 +169,7 @@ export function createAeroBodyGridService(options = {}) {
   let latestEntries = [];
   let predictedSampleCount = 0;
   let latestPredictedTimestamp = /** @type {number | null} */ (null);
+  let latestMeasuredNoseParallax = /** @type {InternalMeasuredNoseParallaxSample | null} */ (null);
   let destroyed = false;
   let latestSnapshot = buildSnapshot();
 
@@ -241,6 +256,7 @@ export function createAeroBodyGridService(options = {}) {
     freshCalibrationRequired = true;
     latestEvidence = null;
     latestEntries = [];
+    latestMeasuredNoseParallax = null;
     holdStartedAt = null;
     holdFrames = [];
     releaseObserved = true;
@@ -263,6 +279,7 @@ export function createAeroBodyGridService(options = {}) {
     }
     const sample = normalizeSample(input);
     if (sample === null) {
+      latestMeasuredNoseParallax = null;
       return latestSnapshot;
     }
     if (sample.provenance === "predicted") {
@@ -271,6 +288,7 @@ export function createAeroBodyGridService(options = {}) {
       return publish();
     }
     if (lastMeasuredAt !== null && sample.measurementTimestampMs < lastMeasuredAt) {
+      latestMeasuredNoseParallax = null;
       resetWristMotionHistories();
       return latestSnapshot;
     }
@@ -278,6 +296,7 @@ export function createAeroBodyGridService(options = {}) {
       (lastMeasuredAt !== null && sample.measurementTimestampMs === lastMeasuredAt) ||
       `${sample.sourceId}\u0000${sample.measuredSourceFrameId}` === lastMeasuredSourceFrameKey
     ) {
+      latestMeasuredNoseParallax = null;
       return latestSnapshot;
     }
     if (lastMeasuredAt !== null && sample.measurementTimestampMs - lastMeasuredAt >= calibrationDefaults.trackingLossPauseMs) {
@@ -393,6 +412,7 @@ export function createAeroBodyGridService(options = {}) {
 
   /** @param {AeroPoseRoutingSample} sample @param {Map<string, NormalizedPoseLandmark>} landmarks */
   function mapMeasuredAnchors(sample, landmarks) {
+    latestMeasuredNoseParallax = null;
     if (calibrationId === null || bounds === null) {
       return;
     }
@@ -462,6 +482,9 @@ export function createAeroBodyGridService(options = {}) {
     }
     latestAnchors = anchors;
     latestEntries = entries;
+    if (scoringValid) {
+      latestMeasuredNoseParallax = measuredNoseParallaxSample(sample, landmarks.get("nose"));
+    }
     if (!scoringValid) {
       latestEvidence = null;
       resetStraightStates();
@@ -483,6 +506,44 @@ export function createAeroBodyGridService(options = {}) {
     if (evidenceHistory.length > historyCapacity) {
       evidenceHistory.splice(0, evidenceHistory.length - historyCapacity);
     }
+  }
+
+  /** @param {AeroPoseRoutingSample} sample @param {NormalizedPoseLandmark | undefined} nose */
+  function measuredNoseParallaxSample(sample, nose) {
+    if (
+      nose === undefined ||
+      nose.confidence < calibrationDefaults.requiredConfidence ||
+      calibrationId === null ||
+      sourceIdentity === null ||
+      bounds === null ||
+      baselineNose === null ||
+      !allRequiredAnchorsVisible ||
+      trackingPaused ||
+      freshCalibrationRequired
+    ) {
+      return null;
+    }
+    const current = normalizeAgainstBounds(cameraPreviewToAthlete(nose), bounds);
+    if (
+      normalizedPointToGridCell(current, athleteBodyGrid4x3) === null ||
+      !hasDirectionalParallaxHeadroom(baselineNose.x) ||
+      !hasDirectionalParallaxHeadroom(baselineNose.y)
+    ) {
+      return null;
+    }
+    const xDeflection = directionalDeflection(current.x, baselineNose.x);
+    const yDeflection = directionalDeflection(current.y, baselineNose.y);
+    if (!Number.isFinite(xDeflection) || !Number.isFinite(yDeflection)) {
+      return null;
+    }
+    return Object.freeze({
+      calibrationId,
+      sourceIdentity,
+      measurementTimestampMs: sample.measurementTimestampMs,
+      measuredSourceFrameId: sample.measuredSourceFrameId,
+      xDeflection,
+      yDeflection
+    });
   }
 
   /**
@@ -646,6 +707,7 @@ export function createAeroBodyGridService(options = {}) {
       return latestSnapshot;
     }
     timestampMs = nextTimestamp;
+    latestMeasuredNoseParallax = null;
     if (lossStartedAt === null) {
       lossStartedAt = lastMeasuredAt ?? timestampMs;
     }
@@ -687,6 +749,8 @@ export function createAeroBodyGridService(options = {}) {
     trackingPaused = true;
     freshCalibrationRequired = true;
     latestEvidence = null;
+    latestMeasuredNoseParallax = null;
+    baselineNose = null;
     latestAnchors = [];
     latestEntries = [];
     holdFrames = [];
@@ -697,7 +761,26 @@ export function createAeroBodyGridService(options = {}) {
     listeners.clear();
   }
 
-  return {
+  function readMeasuredNoseParallax() {
+    const sample = latestMeasuredNoseParallax;
+    if (
+      destroyed ||
+      sample === null ||
+      calibrationId === null ||
+      sourceIdentity === null ||
+      sample.calibrationId !== calibrationId ||
+      sample.sourceIdentity !== sourceIdentity ||
+      sample.measurementTimestampMs !== lastMeasuredAt ||
+      trackingPaused ||
+      freshCalibrationRequired ||
+      !allRequiredAnchorsVisible
+    ) {
+      return null;
+    }
+    return sample;
+  }
+
+  const serviceValue = {
     serviceId: aeroBodyGridServiceId,
     processPoseSample,
     advanceTime,
@@ -719,6 +802,14 @@ export function createAeroBodyGridService(options = {}) {
     },
     destroy
   };
+  Object.defineProperty(serviceValue, internalMeasuredNoseParallaxSymbol, {
+    configurable: false,
+    enumerable: false,
+    get() {
+      return destroyed || sourceIdentity === null ? undefined : readMeasuredNoseParallax;
+    }
+  });
+  return serviceValue;
 }
 
 /** @param {AeroPoseRoutingSample | NormalizedPoseFrame} input @returns {AeroPoseRoutingSample | null} */
@@ -883,6 +974,18 @@ function normalizeAgainstBounds(point, bounds) {
     x: (point.x - bounds.left) / (bounds.right - bounds.left),
     y: (point.y - bounds.top) / (bounds.bottom - bounds.top)
   };
+}
+
+/** @param {number} baseline */
+function hasDirectionalParallaxHeadroom(baseline) {
+  return Number.isFinite(baseline) && baseline > minimumParallaxHeadroom && 1 - baseline > minimumParallaxHeadroom;
+}
+
+/** @param {number} current @param {number} baseline */
+function directionalDeflection(current, baseline) {
+  const delta = current - baseline;
+  const headroom = delta < 0 ? baseline : 1 - baseline;
+  return Math.min(1, Math.max(-1, delta / headroom));
 }
 
 /**
