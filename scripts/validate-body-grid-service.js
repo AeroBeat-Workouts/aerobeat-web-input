@@ -45,11 +45,23 @@ function pose(timestampMs, changes = {}, options = {}) {
 
 /** @param {ReturnType<typeof createAeroBodyGridService>} service @param {number} start @param {{sourceAspectRatio?: number, sourceChangeId?: string}} [context] */
 function calibrate(service, start = 0, context = {}) {
-  for (let offset = 0; offset <= 4000; offset += 250) {
+  // Span 2250ms so a full 2000ms hold completes even if the first frame
+  // shares a timestamp with the previous measurement and is ignored.
+  for (let offset = 0; offset <= 2250; offset += 250) {
     service.processPoseSample(pose(start + offset), context);
   }
   return service.getSnapshot();
 }
+
+/** Pose changes that drop exactly one loss-decision anchor below the confidence gate. */
+const leftWristLoss = { left_wrist: { x: 0.8, y: 0.4, confidence: 0.2 } };
+/** Pose changes that drop only non-loss anchors (shoulders/elbows) below the gate. */
+const shoulderElbowLoss = {
+  left_shoulder: { x: 0.6, y: 0.4, confidence: 0.2 },
+  right_shoulder: { x: 0.4, y: 0.4, confidence: 0.2 },
+  left_elbow: { x: 0.7, y: 0.4, confidence: 0.2 },
+  right_elbow: { x: 0.3, y: 0.4, confidence: 0.2 }
+};
 
 const service = createAeroBodyGridService({ calibrationIdPrefix: "test" });
 let snapshot = service.getSnapshot();
@@ -64,15 +76,20 @@ assert.equal(snapshot.calibration.holdProgressMs, 0);
 service.processPoseSample(pose(250));
 assert.equal(service.getSnapshot().calibration.holdProgressMs, 250);
 service.processPoseSample(pose(500, { left_wrist: { x: 0.8, y: 0.55 } }));
-assert.equal(service.getSnapshot().calibration.state, "uncalibrated", "a failed gate resets the hold window");
+assert.equal(service.getSnapshot().calibration.state, "uncalibrated", "a failed gate during the first hold window restarts the hold");
 assert.equal(service.getSnapshot().calibration.holdProgressMs, 0);
 
-snapshot = calibrate(service, 750);
+// The initial hold window is 2000ms; a failed gate restarts it from the next qualified frame.
+service.processPoseSample(pose(750));
+assert.equal(service.getSnapshot().calibration.holdProgressMs, 0, "the hold restarts at the next qualified frame after a failed gate");
+service.processPoseSample(pose(1000, { left_wrist: { x: 0.8, y: 0.55 } }));
+assert.equal(service.getSnapshot().calibration.holdProgressMs, 0, "a second failed gate restarts the hold again");
+snapshot = calibrate(service, 1000);
 assert.equal(snapshot.calibration.state, "cooldown");
 assert.equal(snapshot.calibration.readiness, "countdown");
 assert.equal(snapshot.calibration.calibrationId, "test-1");
 assert.equal(snapshot.calibration.releaseRequired, true);
-assert.equal(snapshot.calibration.cooldownRemainingMs, 4000);
+assert.equal(snapshot.calibration.cooldownRemainingMs, 2000, "cooldown now comes from the 2000ms contract");
 assert.ok(isCalibrationSnapshot(snapshot.calibration));
 assert.ok(isTrackingSafetySnapshot(snapshot.tracking));
 const bounds = snapshot.calibration.bounds;
@@ -88,7 +105,7 @@ const releasedChanges = {
   left_wrist: { x: 0.56, y: 0.55 },
   right_wrist: { x: 0.44, y: 0.55 }
 };
-for (let at = 5000; at <= 11000; at += 250) {
+for (let at = 2500; at <= 11000; at += 250) {
   snapshot = service.processPoseSample(pose(at, releasedChanges));
 }
 assert.equal(snapshot.calibration.releaseRequired, false);
@@ -97,9 +114,9 @@ assert.equal(snapshot.anchors.length, 7);
 assert.ok(snapshot.anchors.every(isBodyGridAnchorSnapshot));
 assert.ok(snapshot.latestEvidence && isGameplayEvidenceSnapshot(snapshot.latestEvidence));
 
-// Camera-preview x is opposed exactly once: camera x=.8 maps to athlete x=.2.
+// Camera-preview x is opposed exactly once: camera x=.8 maps to athlete x=.2 (raw ~0).
 const cornerFrame = pose(11100, {
-  nose: { x: 0.8, y: 0 },
+  nose: { x: 0.799999999, y: 0.000000001 },
   left_elbow: { x: 0.61, y: 0.52 },
   right_elbow: { x: 0.39, y: 0.52 },
   left_wrist: { x: 0.56, y: 0.55 },
@@ -109,8 +126,8 @@ snapshot = service.processPoseSample(cornerFrame);
 const noseCorner = snapshot.anchors.find((anchor) => anchor.anchor === "nose");
 assert.equal(noseCorner?.cell, 0);
 assert.equal(noseCorner?.subcell, 0);
-assert.ok(Math.abs(noseCorner?.x ?? 1) < 1e-12);
-assert.ok(Math.abs(noseCorner?.y ?? 1) < 1e-12);
+assert.ok(Math.abs(noseCorner?.x ?? 1) < 1e-8, "nose is at the left/top grid edge");
+assert.ok(Math.abs(noseCorner?.y ?? 1) < 1e-8, "nose is at the left/top grid edge");
 
 const farCorner = pose(11200, {
   nose: { x: 0.200000001, y: 0.799999999 },
@@ -131,7 +148,7 @@ snapshot = service.processPoseSample(pose(11225, {
 assert.equal(snapshot.anchors.find((anchor) => anchor.anchor === "nose")?.cell, 3);
 assert.equal(snapshot.anchors.find((anchor) => anchor.anchor === "nose")?.subcell, 7);
 snapshot = service.processPoseSample(pose(11250, {
-  nose: { x: 0.8, y: 0.799999999 },
+  nose: { x: 0.799999999, y: 0.799999998 },
   ...releasedChanges
 }));
 assert.equal(snapshot.anchors.find((anchor) => anchor.anchor === "nose")?.cell, 8);
@@ -168,7 +185,7 @@ assert.equal(noseEntry.direction, "right");
 
 const cardinalService = createAeroBodyGridService({ calibrationIdPrefix: "cardinal" });
 calibrate(cardinalService, 0);
-for (let at = 4250; at <= 8250; at += 250) {
+for (let at = 2500; at <= 8250; at += 250) {
   cardinalService.processPoseSample(pose(at, releasedChanges));
 }
 const cameraPointForRaw = (x, y) => ({ x: 1 - (0.2 + x * 0.6), y: y * 0.8 });
@@ -208,7 +225,7 @@ const mainStraightEvidence = snapshot.latestEvidence;
 
 const independentStraight = createAeroBodyGridService({ calibrationIdPrefix: "straight-independent" });
 calibrate(independentStraight, 0);
-for (let at = 4250; at <= 8250; at += 250) {
+for (let at = 2500; at <= 8250; at += 250) {
   independentStraight.processPoseSample(pose(at, releasedChanges));
 }
 for (const at of [8500, 8650, 8750]) {
@@ -268,9 +285,13 @@ snapshot = service.processPoseSample(pose(11960, {
 assert.ok(snapshot.latestEvidence?.activeBoxingActions.includes("crossed_guard"));
 assert.ok(snapshot.latestEvidence?.activeBoxingActions.includes("weave_left"));
 
-// 500ms sustained seven-anchor loss pauses, dims retained geometry, clears evidence and freezes countdown.
+// 750ms sustained three-anchor loss (3+ consecutive fails latch the window) pauses,
+// dims retained geometry, clears evidence and freezes countdown.
 service.processPoseSample(pose(12000, { right_wrist: { x: 0.46, y: 0.58, confidence: 0.2 } }));
+snapshot = service.processPoseSample(pose(12250, { right_wrist: { x: 0.46, y: 0.58, confidence: 0.2 } }));
+assert.equal(snapshot.tracking.gameplayPaused, false, "one failed sample never latches the loss window");
 snapshot = service.processPoseSample(pose(12500, { right_wrist: { x: 0.46, y: 0.58, confidence: 0.2 } }));
+snapshot = service.processPoseSample(pose(12750, { right_wrist: { x: 0.46, y: 0.58, confidence: 0.2 } }));
 assert.equal(snapshot.tracking.gameplayPaused, true);
 assert.equal(snapshot.tracking.freshCalibrationRequired, true);
 assert.equal(snapshot.calibration.state, "tracking_lost");
@@ -278,14 +299,65 @@ assert.equal(snapshot.latestEvidence, null);
 assert.equal(snapshot.retainedGeometryDimmed, true);
 assert.equal(snapshot.countdownFrozen, true);
 
-snapshot = calibrate(service, 12600);
+// Partial auto-recovery: the three loss-decision anchors visible and stable for
+// 300ms of measured time clear freshCalibrationRequired WITHOUT recalibrating.
+const beforeRecovery = JSON.stringify(service.getSnapshot().calibration.bounds);
+const beforeRecoveryId = service.getSnapshot().calibration.calibrationId;
+service.processPoseSample(pose(13000, releasedChanges));
+const duringRecovery = service.getSnapshot();
+assert.equal(duringRecovery.tracking.gameplayPaused, true, "the session stays paused while the recovery hold accumulates");
+assert.equal(duringRecovery.tracking.freshCalibrationRequired, true, "the recovery hold has not yet reached 300ms");
+assert.equal(duringRecovery.tracking.recoveryInProgress, true, "recovery-in-progress is exposed semantically");
+service.processPoseSample(pose(13300, releasedChanges));
+const partialRecovered = service.getSnapshot();
+assert.equal(partialRecovered.calibration.calibrationId, beforeRecoveryId, "recovery does not mint a new calibrationId");
+assert.equal(JSON.stringify(partialRecovered.calibration.bounds), beforeRecovery, "recovery keeps bounds byte-identical");
+assert.equal(partialRecovered.tracking.gameplayPaused, false);
+assert.equal(partialRecovered.tracking.freshCalibrationRequired, false);
+assert.equal(partialRecovered.tracking.recoveryInProgress, false);
+assert.equal(partialRecovered.calibration.readiness, "countdown");
+assert.equal(partialRecovered.calibration.state, "calibrated");
+assert.ok(partialRecovered.latestEvidence, "evidence resumes immediately after partial recovery");
+
+// (e) A recovery hold interrupted by one bad sample restarts from zero.
+const interruptService = createAeroBodyGridService({ calibrationIdPrefix: "interrupt" });
+calibrate(interruptService, 0);
+for (let at = 2500; at <= 6250; at += 250) {
+  interruptService.processPoseSample(pose(at, releasedChanges));
+}
+// Three consecutive fails latch and pause.
+interruptService.processPoseSample(pose(6500, { right_wrist: { x: 0.46, y: 0.58, confidence: 0.2 } }));
+interruptService.processPoseSample(pose(6750, { right_wrist: { x: 0.46, y: 0.58, confidence: 0.2 } }));
+interruptService.processPoseSample(pose(7000, { right_wrist: { x: 0.46, y: 0.58, confidence: 0.2 } }));
+interruptService.processPoseSample(pose(7250, { right_wrist: { x: 0.46, y: 0.58, confidence: 0.2 } }));
+assert.equal(interruptService.getSnapshot().tracking.gameplayPaused, true);
+// Recovery starts at 7500.
+interruptService.processPoseSample(pose(7500, releasedChanges));
+assert.equal(interruptService.getSnapshot().tracking.recoveryInProgress, true, "recovery hold starts on the first good sample");
+// Interrupt at 7600.
+interruptService.processPoseSample(pose(7600, { right_wrist: { x: 0.46, y: 0.58, confidence: 0.2 } }));
+assert.equal(interruptService.getSnapshot().tracking.recoveryInProgress, false, "one bad sample interrupts the recovery hold");
+// Recovery restarts at 7700.
+interruptService.processPoseSample(pose(7700, releasedChanges));
+assert.equal(interruptService.getSnapshot().tracking.recoveryInProgress, true, "the restarted hold counts from the new start");
+// The restarted hold needs a full 300ms: 7700→8000 is 300ms.
+interruptService.processPoseSample(pose(7999, releasedChanges));
+assert.equal(interruptService.getSnapshot().tracking.freshCalibrationRequired, true, "the restarted hold has not yet reached 300ms");
+interruptService.processPoseSample(pose(8000, releasedChanges));
+assert.equal(interruptService.getSnapshot().tracking.freshCalibrationRequired, false, "the restarted 300ms hold still clears the requirement");
+
+// Full T-pose calibration remains available and is the invalidation path for source changes.
+for (let at = 13500; at <= 14250; at += 250) {
+  service.processPoseSample(pose(at, releasedChanges));
+}
+snapshot = calibrate(service, 14500);
 assert.equal(snapshot.calibration.calibrationId, "test-2");
 assert.equal(snapshot.tracking.gameplayPaused, false);
 assert.equal(snapshot.tracking.freshCalibrationRequired, false);
 assert.equal(snapshot.calibration.readiness, "countdown");
 
 // Source, mirror, and source-aspect identity changes each invalidate scoring without applying a second x flip.
-snapshot = service.processPoseSample(pose(16700), { sourceAspectRatio: 4 / 3, sourceChangeId: "camera-b" });
+snapshot = service.processPoseSample(pose(17000), { sourceAspectRatio: 4 / 3, sourceChangeId: "camera-b" });
 assert.equal(snapshot.calibration.state, "recalibrating");
 assert.equal(snapshot.calibration.invalidationReason, "source_changed");
 assert.equal(snapshot.retainedGeometryDimmed, true);
@@ -306,8 +378,73 @@ for (const kind of ["source", "mirror", "aspect"]) {
   assert.equal(snapshot.tracking.freshCalibrationRequired, true);
 }
 
-// Explicit reset remains paused and keeps old geometry only for dim display.
-snapshot = service.resetCalibration("badge_reset");
+// Source change does NOT allow partial auto-recovery: full T-pose recalibration is required.
+const sourceNoRecovery = createAeroBodyGridService({ calibrationIdPrefix: "source-no-recovery" });
+calibrate(sourceNoRecovery, 0);
+for (let at = 2500; at <= 6250; at += 250) {
+  sourceNoRecovery.processPoseSample(pose(at, releasedChanges));
+}
+// Source change invalidates calibration; recovery is not armed.
+sourceNoRecovery.processPoseSample(pose(6500, {}, { sourceId: "camera-b" }));
+assert.equal(sourceNoRecovery.getSnapshot().tracking.freshCalibrationRequired, true);
+// Even with the three loss-decision anchors visible and stable for 300ms,
+// partial recovery does not clear freshCalibrationRequired after a source change.
+for (let at = 6600; at <= 7200; at += 250) {
+  sourceNoRecovery.processPoseSample(pose(at, releasedChanges, { sourceId: "camera-b" }));
+}
+assert.equal(sourceNoRecovery.getSnapshot().tracking.freshCalibrationRequired, true, "source change requires full T-pose, not partial recovery");
+assert.equal(sourceNoRecovery.getSnapshot().tracking.recoveryInProgress, false, "no recovery hold after a source change");
+
+// (a) Five scattered bad frames within 1s: consecutive fails never reach the
+// three-sample latch, so no pause can occur.
+const scattered = createAeroBodyGridService({ calibrationIdPrefix: "scattered" });
+calibrate(scattered, 0);
+for (let at = 2500; at <= 6250; at += 250) {
+  scattered.processPoseSample(pose(at, releasedChanges));
+}
+for (let i = 0; i < 5; i += 1) {
+  scattered.processPoseSample(pose(6500 + i * 200, leftWristLoss));
+  scattered.processPoseSample(pose(6600 + i * 200, releasedChanges));
+}
+assert.equal(scattered.getSnapshot().tracking.gameplayPaused, false, "non-consecutive dropped samples never trip the loss clock");
+assert.equal(scattered.getSnapshot().tracking.freshCalibrationRequired, false);
+
+// (c) A shoulder/elbow-only dropout is NO longer a tracking-loss event:
+// shoulders and elbows remain calibration/geometry inputs but do not gate loss.
+const shoulderDropout = createAeroBodyGridService({ calibrationIdPrefix: "shoulder-dropout" });
+calibrate(shoulderDropout, 0);
+for (let at = 2500; at <= 6250; at += 250) {
+  shoulderDropout.processPoseSample(pose(at, releasedChanges));
+}
+for (let at = 6500; at <= 8990; at += 250) {
+  const frame = shoulderDropout.processPoseSample(pose(at, shoulderElbowLoss));
+  assert.equal(frame.tracking.gameplayPaused, false, "shoulder/elbow-only dropout never pauses gameplay");
+  assert.equal(frame.tracking.allRequiredAnchorsVisible, false, "the seven-anchor visibility flag still reflects all anchors");
+}
+const postShoulderFrame = shoulderDropout.processPoseSample(pose(9100, releasedChanges));
+assert.equal(postShoulderFrame.tracking.gameplayPaused, false);
+assert.equal(postShoulderFrame.tracking.freshCalibrationRequired, false, "no recalibration is required after a non-loss dropout");
+assert.equal(shoulderDropout.getSnapshot().calibration.state, "calibrated");
+assert.ok(shoulderDropout.getFreshEvidence(9200), "evidence stays fresh through a non-loss dropout");
+
+// Gap-based trigger: a whole silent window latches instantly, but pre-latch
+// silence (fresh source, one advanceTime before any measured fail) does not.
+const gapSilent = createAeroBodyGridService({ calibrationIdPrefix: "gap-silent" });
+calibrate(gapSilent, 0);
+for (let at = 2500; at <= 6250; at += 250) {
+  gapSilent.processPoseSample(pose(at, releasedChanges));
+}
+assert.equal(gapSilent.advanceTime(7250).tracking.gameplayPaused, false, "one pre-latch missed tick cannot trip the loss window");
+assert.equal(gapSilent.advanceTime(7500).tracking.gameplayPaused, false, "two pre-latch missed ticks still cannot trip the loss window");
+assert.equal(gapSilent.advanceTime(7750).tracking.gameplayPaused, true, "three consecutive missed ticks latch and hold 750ms of measured loss");
+assert.equal(gapSilent.getSnapshot().latestEvidence, null);
+
+const explicitReset = createAeroBodyGridService({ calibrationIdPrefix: "explicit-reset" });
+calibrate(explicitReset, 0);
+for (let at = 2500; at <= 6250; at += 250) {
+  explicitReset.processPoseSample(pose(at, releasedChanges));
+}
+snapshot = explicitReset.resetCalibration("badge_reset");
 assert.equal(snapshot.tracking.gameplayPaused, true);
 assert.equal(snapshot.calibration.invalidationReason, "badge_reset");
 assert.ok(snapshot.calibration.bounds);
@@ -315,16 +452,20 @@ assert.ok(snapshot.calibration.bounds);
 // No-frame timeout uses the last real measurement and does not invent evidence.
 const timeoutService = createAeroBodyGridService({ calibrationIdPrefix: "timeout" });
 calibrate(timeoutService, 0);
-timeoutService.processPoseSample(pose(4100, {
-  left_elbow: { x: 0.61, y: 0.52 }, right_elbow: { x: 0.39, y: 0.52 },
-  left_wrist: { x: 0.56, y: 0.55 }, right_wrist: { x: 0.44, y: 0.55 }
-}));
-snapshot = timeoutService.advanceTime(4600);
-assert.equal(snapshot.tracking.gameplayPaused, true);
+for (let at = 2500; at <= 6250; at += 250) {
+  timeoutService.processPoseSample(pose(at, {
+    left_elbow: { x: 0.61, y: 0.52 }, right_elbow: { x: 0.39, y: 0.52 },
+    left_wrist: { x: 0.56, y: 0.55 }, right_wrist: { x: 0.44, y: 0.55 }
+  }));
+}
+assert.equal(timeoutService.advanceTime(6500).tracking.gameplayPaused, false, "a first missed tick before the latch does not pause");
+assert.equal(timeoutService.advanceTime(6750).tracking.gameplayPaused, false, "a second missed tick still cannot trip the loss window");
+snapshot = timeoutService.advanceTime(7000);
+assert.equal(snapshot.tracking.gameplayPaused, true, "three consecutive no-frame misses latch and hold 750ms of measured loss");
 assert.equal(snapshot.latestEvidence, null);
 
 const averagedService = createAeroBodyGridService({ calibrationIdPrefix: "average" });
-for (let index = 0; index <= 16; index += 1) {
+for (let index = 0; index <= 8; index += 1) {
   const leftX = 0.75 + 0.1 * index / 16;
   averagedService.processPoseSample(pose(index * 250, {
     left_wrist: { x: leftX, y: 0.4 },
@@ -333,8 +474,8 @@ for (let index = 0; index <= 16; index += 1) {
 }
 const averagedBounds = averagedService.getSnapshot().calibration.bounds;
 assert.ok(averagedBounds);
-assert.ok(Math.abs(averagedBounds.left - 0.2) < 1e-9);
-assert.ok(Math.abs(averagedBounds.right - 0.8) < 1e-9, "geometry uses the complete qualified hold-window average");
+assert.ok(Math.abs(averagedBounds.left - 0.225) < 1e-9, "geometry uses the complete 2000ms hold-window average");
+assert.ok(Math.abs(averagedBounds.right - 0.775) < 1e-9, "geometry uses the complete 2000ms hold-window average");
 
 // Padding/aspect are measured in source pixels: width and height grow independently.
 const padded = createAeroBodyGridService({ calibrationIdPrefix: "padded", sourceAspectRatio: 1, padding: { left: 0.1, right: 0.1, top: 0.2, bottom: 0.2 } });
@@ -344,32 +485,31 @@ assert.ok(paddedBounds);
 assert.ok(Math.abs((paddedBounds.right - paddedBounds.left) - 0.72) < 1e-9);
 assert.ok(Math.abs((paddedBounds.bottom - paddedBounds.top) - 0.63) < 1e-9);
 
-// A sparse pair of frames cannot masquerade as a sustained four-second hold.
+// A sparse pair of frames cannot masquerade as a sustained two-second hold.
 const sparseHold = createAeroBodyGridService({ calibrationIdPrefix: "sparse" });
 sparseHold.processPoseSample(pose(0));
-snapshot = sparseHold.processPoseSample(pose(4000));
+snapshot = sparseHold.processPoseSample(pose(2100));
 assert.equal(snapshot.calibration.calibrationId, null);
-assert.equal(snapshot.tracking.gameplayPaused, true);
+assert.equal(snapshot.tracking.gameplayPaused, true, "a full silent window is a latched loss");
 assert.equal(snapshot.tracking.freshCalibrationRequired, true);
 
 const irregularHold = createAeroBodyGridService({ calibrationIdPrefix: "irregular" });
-for (const at of [0, 499, 998, 1497, 1996, 2495, 2994, 3493, 3992]) {
+for (let at = 0; at <= 2000; at += 100) {
   irregularHold.processPoseSample(pose(at));
 }
-assert.equal(irregularHold.getSnapshot().calibration.calibrationId, null);
-snapshot = irregularHold.processPoseSample(pose(4000));
-assert.equal(snapshot.calibration.calibrationId, "irregular-1", "the exact 4000ms boundary qualifies");
+snapshot = irregularHold.getSnapshot();
+assert.equal(snapshot.calibration.calibrationId, "irregular-1", "the exact 2000ms boundary qualifies");
 
 const refire = createAeroBodyGridService({ calibrationIdPrefix: "refire" });
 calibrate(refire, 0);
-for (let at = 4250; at <= 8000; at += 250) {
+for (let at = 2500; at <= 6000; at += 250) {
   refire.processPoseSample(pose(at));
 }
 assert.equal(refire.getSnapshot().calibration.calibrationId, "refire-1", "cooldown blocks held-pose refire");
 assert.equal(refire.getSnapshot().calibration.releaseRequired, true);
-refire.processPoseSample(pose(8250, releasedChanges));
+refire.processPoseSample(pose(6250, releasedChanges));
 assert.equal(refire.getSnapshot().calibration.releaseRequired, false);
-for (let at = 8500; at <= 12500; at += 250) {
+for (let at = 6500; at <= 10500; at += 250) {
   refire.processPoseSample(pose(at));
 }
 assert.equal(refire.getSnapshot().calibration.calibrationId, "refire-2", "release plus a fresh exact hold refires");
@@ -382,7 +522,7 @@ for (const name of names) {
 }
 const exactConfidence = createAeroBodyGridService({ calibrationIdPrefix: "confidence-exact" });
 const exactConfidenceChanges = Object.fromEntries(names.map((name) => [name, { confidence: 0.5 }]));
-for (let at = 0; at <= 4000; at += 250) {
+for (let at = 0; at <= 2000; at += 250) {
   exactConfidence.processPoseSample(pose(at, exactConfidenceChanges));
 }
 assert.equal(exactConfidence.getSnapshot().calibration.calibrationId, "confidence-exact-1");
@@ -405,36 +545,43 @@ for (const [label, changes] of [
 // and timestamp/frame rollback cannot rewrite measured history.
 const adversarial = createAeroBodyGridService({ calibrationIdPrefix: "adversarial", historyCapacity: 8 });
 calibrate(adversarial, 0);
-for (let at = 4250; at <= 8250; at += 250) {
+for (let at = 2500; at <= 6250; at += 250) {
   adversarial.processPoseSample(pose(at, releasedChanges));
 }
-const validBeforeMalformed = adversarial.processPoseSample(pose(8500, releasedChanges));
+const validBeforeMalformed = adversarial.processPoseSample(pose(6500, releasedChanges));
 assert.ok(validBeforeMalformed.anchors.every(isBodyGridAnchorSnapshot));
-const nanFrame = pose(8750, { nose: { x: Number.NaN, y: 0.3 } });
+// One bad frame: the loss clock never latches (hysteresis) and no recovery is triggered
+// because the service is not in a loss state.
+const singleBad = adversarial.processPoseSample(pose(6625, leftWristLoss));
+assert.equal(singleBad.tracking.gameplayPaused, false, "a single dropped sample cannot trip the loss window");
+assert.equal(singleBad.tracking.recoveryInProgress, false, "no recovery is in progress for a non-loss dropout");
+const afterSingleBad = adversarial.processPoseSample(pose(6640, releasedChanges));
+assert.equal(afterSingleBad.tracking.recoveryInProgress, false, "the passing sample does not start a recovery hold outside a loss state");
+const nanFrame = pose(6750, { nose: { x: Number.NaN, y: 0.3 } });
 snapshot = adversarial.processPoseSample(nanFrame);
 assert.equal(snapshot.tracking.allRequiredAnchorsVisible, false);
 assert.ok(snapshot.anchors.every(isBodyGridAnchorSnapshot));
-const duplicateFrame = pose(9000);
+const duplicateFrame = pose(6900);
 duplicateFrame.landmarks.push({ name: "nose", x: 0.2, y: 0.2, confidence: 0.95 });
 snapshot = adversarial.processPoseSample(duplicateFrame);
 assert.equal(snapshot.tracking.allRequiredAnchorsVisible, false);
 assert.ok(snapshot.anchors.every(isBodyGridAnchorSnapshot));
-const recovered = adversarial.processPoseSample(pose(9250, releasedChanges));
-const rollback = adversarial.processPoseSample(pose(9100));
+const recovered = adversarial.processPoseSample(pose(7250, releasedChanges));
+const rollback = adversarial.processPoseSample(pose(7100));
 assert.equal(rollback, recovered, "timestamp rollback is ignored atomically");
-assert.equal(rollback.latestEvidence?.measurementTimestampMs, 9250);
+assert.equal(rollback.latestEvidence?.measurementTimestampMs, 7250);
 assert.doesNotThrow(() => adversarial.processPoseSample(/** @type {never} */ (null)));
-for (let at = 9275; at <= 9750; at += 25) {
+for (let at = 7275; at <= 7750; at += 25) {
   adversarial.processPoseSample(pose(at, releasedChanges));
 }
 const boundedHistory = adversarial.getEvidenceHistory();
 assert.equal(boundedHistory.length, 8);
 assert.ok(Object.isFrozen(boundedHistory));
 assert.ok(boundedHistory.every(Object.isFrozen));
-const routedFrame = createMeasuredPoseRoutingSample(pose(10000, releasedChanges), { routeEpoch: "duplicate-audit" });
+const routedFrame = createMeasuredPoseRoutingSample(pose(8000, releasedChanges), { routeEpoch: "duplicate-audit" });
 const routedSnapshot = adversarial.processPoseSample(routedFrame);
 const duplicateRoutedFrame = {
-  ...createMeasuredPoseRoutingSample(pose(10250, releasedChanges), { routeEpoch: "duplicate-audit" }),
+  ...createMeasuredPoseRoutingSample(pose(8250, releasedChanges), { routeEpoch: "duplicate-audit" }),
   measuredSourceFrameId: routedFrame.measuredSourceFrameId
 };
 assert.equal(adversarial.processPoseSample(duplicateRoutedFrame), routedSnapshot, "duplicate source-frame identity is ignored");
@@ -444,12 +591,14 @@ assert.equal(adversarial.getEvidenceHistory().length, 0, "reset clears scoring e
 
 const noFrameAnchors = createAeroBodyGridService({ calibrationIdPrefix: "no-frame-anchors" });
 calibrate(noFrameAnchors, 0);
-for (let at = 4250; at <= 8250; at += 250) {
+for (let at = 2500; at <= 6250; at += 250) {
   noFrameAnchors.processPoseSample(pose(at, releasedChanges));
 }
 assert.ok(noFrameAnchors.getSnapshot().anchors.some((anchor) => anchor.valid));
-snapshot = noFrameAnchors.advanceTime(8750);
-assert.equal(snapshot.tracking.gameplayPaused, true);
+noFrameAnchors.advanceTime(6500);
+noFrameAnchors.advanceTime(6750);
+snapshot = noFrameAnchors.advanceTime(7000);
+assert.equal(snapshot.tracking.gameplayPaused, true, "three consecutive no-frame ticks latch the loss window");
 assert.equal(snapshot.anchors.length, 0, "no-frame pause removes stale gameplay-valid anchors");
 assert.equal(noFrameAnchors.getEvidenceHistory().length, 0);
 

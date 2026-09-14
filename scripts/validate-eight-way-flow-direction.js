@@ -85,7 +85,7 @@ const flowVariant = Object.freeze({
   variantId: "variant",
   chartId: "chart-variant",
   mode: "flow",
-  rulesetId: "flow_grid_v2",
+  rulesetId: "flow_colliders_v1",
   recipeId: null,
   modifierIds: Object.freeze([]),
   ranked: false,

@@ -46,10 +46,10 @@ function privateReader(service) {
 
 /** @param {ReturnType<typeof createAeroBodyGridService>} service @param {Partial<Record<string, {x?: number, y?: number, confidence?: number}>>} [calibrationChanges] @param {{sourceAspectRatio?: number, sourceChangeId?: string}} [context] */
 function calibrate(service, calibrationChanges = {}, context = {}) {
-  for (let offset = 0; offset <= 4000; offset += 250) {
+  for (let offset = 0; offset <= 2000; offset += 250) {
     service.processPoseSample(pose(offset, calibrationChanges), context);
   }
-  for (let at = 4250; at <= 8250; at += 250) {
+  for (let at = 2250; at <= 8250; at += 250) {
     service.processPoseSample(pose(at, { ...releasedChanges, nose: calibrationChanges.nose ?? {} }), context);
   }
 }
@@ -126,12 +126,12 @@ for (const [timestampMs, rawX, rawY, expectedX, expectedY] of [
 }
 
 const averaged = createAeroBodyGridService({ calibrationIdPrefix: "private-average" });
-for (let index = 0; index <= 16; index += 1) {
+for (let index = 0; index <= 8; index += 1) {
   const raw = index % 2 === 0 ? 0.25 : 0.75;
   averaged.processPoseSample(pose(index * 250, { nose: cameraForRaw(raw, raw) }));
 }
-for (let at = 4250; at <= 8250; at += 250) {
-  averaged.processPoseSample(pose(at, { ...releasedChanges, nose: cameraForRaw(0.4852941176470588, 0.4852941176470588) }));
+for (let at = 2250; at <= 8250; at += 250) {
+  averaged.processPoseSample(pose(at, { ...releasedChanges, nose: cameraForRaw(17 / 36, 17 / 36) }));
 }
 const averagedSample = privateReader(averaged)?.();
 assert.ok(averagedSample);

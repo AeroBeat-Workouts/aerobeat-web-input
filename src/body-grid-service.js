@@ -5,8 +5,11 @@ import {
   athleteBodySubgrid8x6,
   calibrationDefaults,
   cameraPreviewToAthlete,
+  lossDecisionAnchorNames,
   normalizedPointToGridCell,
   prototypeJudgementDefaults,
+  recoveryHoldMs,
+  trackingLossHysteresisConsecutiveFails,
   upperBodyAnchorNames
 } from "@aerobeat/web-contracts";
 
@@ -156,9 +159,18 @@ export function createAeroBodyGridService(options = {}) {
   let sourceAspect = defaultAspect;
   let timestampMs = 0;
   let lossStartedAt = /** @type {number | null} */ (null);
+  let lossConsecutiveFails = 0;
   let lastMeasuredAt = /** @type {number | null} */ (null);
   let lastMeasuredSourceFrameKey = /** @type {string | null} */ (null);
   let lossDurationMs = 0;
+  let recoveryHoldStartedAt = /** @type {number | null} */ (null);
+  let recoveryHoldElapsedMs = 0;
+  let recoveryInProgress = false;
+  // Partial auto-recovery is a post-loss exit path, never the initial setup:
+  // it only runs once this service has actually published calibration bounds.
+  let recoveryArmed = false;
+  /** Alias for the contracts constant; the local accumulator is named after its semantics. */
+  const recoveryHoldMsContract = recoveryHoldMs;
   let allRequiredAnchorsVisible = false;
   let trackingPaused = false;
   let freshCalibrationRequired = true;
@@ -201,7 +213,8 @@ export function createAeroBodyGridService(options = {}) {
       lossDurationMs,
       allRequiredAnchorsVisible,
       gameplayPaused: trackingPaused,
-      freshCalibrationRequired
+      freshCalibrationRequired,
+      recoveryInProgress
     };
     return deepFreeze({
       schema: "aerobeat/body_grid_service_snapshot",
@@ -261,6 +274,12 @@ export function createAeroBodyGridService(options = {}) {
     holdFrames = [];
     releaseObserved = true;
     cooldownUntil = 0;
+    // Partial auto-recovery is only for tracking losses: the player was lost
+    // mid-song and the same calibration bounds are still valid. Source changes,
+    // badge resets, and other invalidations require a full T-pose recalibration
+    // because the geometry itself has changed.
+    recoveryArmed = reason === "tracking_lost" && bounds !== null;
+    resetLossAndRecoveryClocks();
     resetMeasuredHistories();
   }
 
@@ -270,6 +289,33 @@ export function createAeroBodyGridService(options = {}) {
     trackingPaused = true;
     lossDurationMs = Math.max(calibrationDefaults.trackingLossPauseMs, lossDurationMs);
     invalidateCalibration("tracking_lost");
+  }
+
+  /** Resets both loss and recovery hysteresis clocks. */
+  function resetLossAndRecoveryClocks() {
+    lossStartedAt = null;
+    lossConsecutiveFails = 0;
+    lossDurationMs = 0;
+    recoveryHoldStartedAt = null;
+    recoveryHoldElapsedMs = 0;
+    recoveryInProgress = false;
+  }
+
+  /** @param {number} sampleTimestamp */
+  function commitTrackingRecovery(sampleTimestamp) {
+    // Partial auto-recovery: anchors are visible and stable, so clear the
+    // recalibration requirement WITHOUT minting a new calibrationId. Bounds stay
+    // byte-identical; the invalidated-ID guard in the coordinator keeps this
+    // recovery from silently resuming on the old calibration. Only reachable
+    // while already calibrated (bounds non-null), so committed bounds never change.
+    freshCalibrationRequired = false;
+    trackingPaused = false;
+    calibrationState = "calibrated";
+    readiness = "countdown";
+    invalidationReason = null;
+    holdStartedAt = null;
+    holdFrames = [];
+    resetLossAndRecoveryClocks();
   }
 
   /** @param {AeroPoseRoutingSample | NormalizedPoseFrame} input @param {AeroBodyGridSampleContext} context */
@@ -300,6 +346,9 @@ export function createAeroBodyGridService(options = {}) {
       return latestSnapshot;
     }
     if (lastMeasuredAt !== null && sample.measurementTimestampMs - lastMeasuredAt >= calibrationDefaults.trackingLossPauseMs) {
+      // A full silent window counts as the required consecutive misses, so
+      // the loss clock latches immediately without inventing intermediate samples.
+      lossConsecutiveFails = trackingLossHysteresisConsecutiveFails;
       lossStartedAt = lastMeasuredAt;
       lossDurationMs = sample.measurementTimestampMs - lastMeasuredAt;
       triggerTrackingPause(sample.measurementTimestampMs);
@@ -320,17 +369,29 @@ export function createAeroBodyGridService(options = {}) {
     }
 
     const landmarks = measuredLandmarkMap(sample);
-    allRequiredAnchorsVisible = upperBodyAnchorNames.every((name) => (landmarks.get(name)?.confidence ?? 0) >= calibrationDefaults.requiredConfidence);
-    if (allRequiredAnchorsVisible) {
+    const lossAnchorsVisible = lossDecisionAnchorNames.every((name) => (landmarks.get(name)?.confidence ?? 0) >= calibrationDefaults.requiredConfidence);
+    allRequiredAnchorsVisible = lossAnchorsVisible && upperBodyAnchorNames.every((name) => (landmarks.get(name)?.confidence ?? 0) >= calibrationDefaults.requiredConfidence);
+    if (lossAnchorsVisible) {
+      // Passing sample: reset the consecutive-fail counter and the 750 ms clock.
       lossStartedAt = null;
+      lossConsecutiveFails = 0;
       lossDurationMs = 0;
+      if (freshCalibrationRequired && recoveryArmed) {
+        updateRecoveryHold(sample.measurementTimestampMs);
+      }
     } else {
+      lossConsecutiveFails += 1;
       lossStartedAt ??= sample.measurementTimestampMs;
       lossDurationMs = Math.max(0, sample.measurementTimestampMs - lossStartedAt);
       latestEntries = [];
       resetWristMotionHistories();
-      if (lossDurationMs >= calibrationDefaults.trackingLossPauseMs) {
-        triggerTrackingPause(sample.measurementTimestampMs);
+      resetRecoveryHold();
+      // The loss clock only starts accumulating after the hysteresis latch:
+      // a single dropped frame can never trip the pause window.
+      if (lossConsecutiveFails >= trackingLossHysteresisConsecutiveFails) {
+        if (lossDurationMs >= calibrationDefaults.trackingLossPauseMs) {
+          triggerTrackingPause(sample.measurementTimestampMs);
+        }
       }
     }
 
@@ -342,6 +403,27 @@ export function createAeroBodyGridService(options = {}) {
       latestEntries = [];
     }
     return publish();
+  }
+
+  /** @param {number} sampleTimestamp */
+  function updateRecoveryHold(sampleTimestamp) {
+    // Partial auto-recovery accumulates measured time while the loss-decision
+    // anchors stay visible; the same hysteresis discipline applies, so any
+    // failed sample restarts the hold from zero.
+    if (recoveryHoldStartedAt === null) {
+      recoveryHoldStartedAt = sampleTimestamp;
+    }
+    recoveryHoldElapsedMs = sampleTimestamp - recoveryHoldStartedAt;
+    recoveryInProgress = true;
+    if (recoveryHoldElapsedMs >= recoveryHoldMsContract) {
+      commitTrackingRecovery(sampleTimestamp);
+    }
+  }
+
+  function resetRecoveryHold() {
+    recoveryHoldStartedAt = null;
+    recoveryHoldElapsedMs = 0;
+    recoveryInProgress = false;
   }
 
   /** @param {AeroPoseRoutingSample} sample @param {Map<string, NormalizedPoseLandmark>} landmarks */
@@ -361,8 +443,12 @@ export function createAeroBodyGridService(options = {}) {
       return;
     }
     if (calibrationId !== null && !freshCalibrationRequired && !qualified) {
-      calibrationState = "calibrated";
-      readiness = "countdown";
+      // Keep the post-loss auto-recovery state (calibrated/countdown) intact;
+      // only reconcile a cooldown or plain calibrated state here.
+      if (!trackingPaused && (calibrationState === "cooldown" || calibrationState === "calibrated")) {
+        calibrationState = "calibrated";
+        readiness = "countdown";
+      }
       return;
     }
     if (!qualified) {
@@ -708,13 +794,17 @@ export function createAeroBodyGridService(options = {}) {
     }
     timestampMs = nextTimestamp;
     latestMeasuredNoseParallax = null;
-    if (lossStartedAt === null) {
-      lossStartedAt = lastMeasuredAt ?? timestampMs;
-    }
-    lossDurationMs = Math.max(0, timestampMs - lossStartedAt);
     allRequiredAnchorsVisible = false;
-    if (lossDurationMs >= calibrationDefaults.trackingLossPauseMs) {
-      triggerTrackingPause(timestampMs);
+    // No fresh measured sample arrived: the missed frame counts as one
+    // consecutive failure. The latch is what admits the measured window;
+    // before it the window keeps counting but cannot trip the pause.
+    lossConsecutiveFails += 1;
+    lossStartedAt ??= lastMeasuredAt ?? nextTimestamp;
+    lossDurationMs = Math.max(0, nextTimestamp - lossStartedAt);
+    resetRecoveryHold();
+    if (lossConsecutiveFails >= trackingLossHysteresisConsecutiveFails &&
+        lossDurationMs >= calibrationDefaults.trackingLossPauseMs) {
+      triggerTrackingPause(nextTimestamp);
     }
     return publish();
   }
