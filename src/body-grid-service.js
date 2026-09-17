@@ -577,6 +577,15 @@ export function createAeroBodyGridService(options = {}) {
       if (!trackingPaused && (calibrationState === "cooldown" || calibrationState === "calibrated")) {
         calibrationState = "calibrated";
         readiness = "countdown";
+      } else if (calibrationState === "recalibrating") {
+        // 0.0.60 W6 (in0o): this non-hold frame interrupted an in-progress
+        // mid-song recalibration hold; cancel the incomplete hold and
+        // reconcile back to the healthy state the player left (the bounds
+        // are still valid — the aborted hold committed nothing).
+        holdStartedAt = null;
+        holdFrames = [];
+        calibrationState = "calibrated";
+        readiness = "countdown";
       }
       return;
     }

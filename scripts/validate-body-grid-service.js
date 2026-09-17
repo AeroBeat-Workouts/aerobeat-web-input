@@ -396,6 +396,44 @@ assert.equal(interruptService.getSnapshot().tracking.anchorsFrozen, false, "one 
 interruptService.processPoseSample(pose(7700, releasedChanges));
 assert.equal(interruptService.getSnapshot().tracking.anchorsFrozen, false);
 
+// 0.0.60 W6 (in0o): an interrupted mid-song T-pose hold must not pin the
+// service in recalibrating/calibration_required. A CLEAN dedicated service
+// (mirroring the freezeService pattern) starts calibrated/countdown so the
+// scenario is not contaminated by the main service's T-pose history.
+const holdInterrupt = createAeroBodyGridService({ calibrationIdPrefix: "hold-interrupt" });
+calibrate(holdInterrupt, 0);
+for (let at = 2500; at <= 6250; at += 250) {
+  holdInterrupt.processPoseSample(pose(at, releasedChanges));
+}
+snapshot = holdInterrupt.getSnapshot();
+assert.equal(snapshot.calibration.state, "calibrated", "the hold-interrupt scenario starts in a clean mid-play state");
+assert.equal(snapshot.calibration.readiness, "countdown");
+// Valid T-pose hold frames start a recalibration hold mid-song.
+snapshot = holdInterrupt.processPoseSample(pose(6500));
+assert.equal(snapshot.calibration.state, "recalibrating", "a T-pose hold frame starts the recalibration hold");
+assert.equal(snapshot.calibration.readiness, "calibration_required");
+snapshot = holdInterrupt.processPoseSample(pose(6750));
+assert.equal(snapshot.calibration.state, "recalibrating");
+assert.equal(snapshot.calibration.holdProgressMs, 250, "the hold accumulates while the T-pose is held");
+// ONE non-hold frame interrupts the hold mid-window: the hold is cleared and
+// the service reconciles back to its healthy calibrated/countdown state.
+snapshot = holdInterrupt.processPoseSample(pose(7000, releasedChanges));
+assert.equal(snapshot.calibration.holdProgressMs, 0, "the interrupting frame cancels the incomplete hold");
+assert.equal(snapshot.calibration.state, "calibrated", "an interrupted hold reconciles back to calibrated");
+assert.equal(snapshot.calibration.readiness, "countdown", "an interrupted hold reconciles readiness back to countdown");
+assert.equal(snapshot.calibration.calibrationId, "hold-interrupt-1", "the interrupted hold never mints a new calibration");
+assert.equal(snapshot.tracking.freshCalibrationRequired, false, "the interruption never requires a fresh calibration");
+// A further neutral frame stays healthy (no re-stick).
+snapshot = holdInterrupt.processPoseSample(pose(7250, releasedChanges));
+assert.equal(snapshot.calibration.state, "calibrated", "a further neutral frame does not re-stick the service");
+assert.equal(snapshot.calibration.readiness, "countdown");
+// A fresh, uninterrupted hold after the interruption still commits (completed
+// hold behavior is unchanged).
+for (let at = 7500; at <= 9500; at += 250) {
+  holdInterrupt.processPoseSample(pose(at));
+}
+assert.equal(holdInterrupt.getSnapshot().calibration.calibrationId, "hold-interrupt-2", "a fresh uninterrupted hold after the interruption still commits");
+
 // Full T-pose calibration remains available and is the invalidation path for source changes.
 for (let at = 14000; at <= 14250; at += 250) {
   service.processPoseSample(pose(at, releasedChanges));
