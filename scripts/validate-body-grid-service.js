@@ -285,69 +285,119 @@ snapshot = service.processPoseSample(pose(11960, {
 assert.ok(snapshot.latestEvidence?.activeBoxingActions.includes("crossed_guard"));
 assert.ok(snapshot.latestEvidence?.activeBoxingActions.includes("weave_left"));
 
-// 750ms sustained three-anchor loss (3+ consecutive fails latch the window) pauses,
-// dims retained geometry, clears evidence and freezes countdown.
-service.processPoseSample(pose(12000, { right_wrist: { x: 0.46, y: 0.58, confidence: 0.2 } }));
-snapshot = service.processPoseSample(pose(12250, { right_wrist: { x: 0.46, y: 0.58, confidence: 0.2 } }));
+// 750ms sustained three-anchor loss (3+ consecutive fails latch the window) now
+// FREEZES the anchors instead of pausing (0.0.60 F4): the session keeps playing,
+// the markers hold their last positions, and the last measured frame is republished
+// as frozen evidence so scoring stays live on the held positions. A dedicated
+// service starts in a clean calibrated/countdown state (mid-play) so the freeze
+// scenario is not contaminated by an in-progress T-pose hold.
+const freezeService = createAeroBodyGridService({ calibrationIdPrefix: "freeze" });
+calibrate(freezeService, 0);
+for (let at = 2500; at <= 6250; at += 250) {
+  freezeService.processPoseSample(pose(at, releasedChanges));
+}
+snapshot = freezeService.getSnapshot();
+assert.equal(snapshot.calibration.state, "calibrated");
+assert.equal(snapshot.calibration.readiness, "countdown", "the freeze scenario starts in a clean mid-play state");
+const beforeFreeze = JSON.stringify(snapshot.anchors);
+const beforeFreezeId = snapshot.calibration.calibrationId;
+const beforeFreezeEvidence = snapshot.latestEvidence;
+freezeService.processPoseSample(pose(6500, { right_wrist: { x: 0.46, y: 0.58, confidence: 0.2 } }));
+assert.equal(freezeService.getSnapshot().tracking.anchorsFrozen, false, "one failed sample never latches the freeze");
+assert.deepEqual(freezeService.getSnapshot().tracking.degradedAnchors, ["right_wrist"], "the degraded set tracks the low-confidence loss anchors");
+snapshot = freezeService.processPoseSample(pose(6750, { right_wrist: { x: 0.46, y: 0.58, confidence: 0.2 } }));
 assert.equal(snapshot.tracking.gameplayPaused, false, "one failed sample never latches the loss window");
-snapshot = service.processPoseSample(pose(12500, { right_wrist: { x: 0.46, y: 0.58, confidence: 0.2 } }));
-snapshot = service.processPoseSample(pose(12750, { right_wrist: { x: 0.46, y: 0.58, confidence: 0.2 } }));
-assert.equal(snapshot.tracking.gameplayPaused, true);
-assert.equal(snapshot.tracking.freshCalibrationRequired, true);
-assert.equal(snapshot.calibration.state, "tracking_lost");
-assert.equal(snapshot.latestEvidence, null);
+assert.equal(snapshot.tracking.anchorsFrozen, false, "two consecutive fails stay under the hysteresis latch");
+snapshot = freezeService.processPoseSample(pose(7000, { right_wrist: { x: 0.46, y: 0.58, confidence: 0.2 } }));
+assert.equal(snapshot.tracking.anchorsFrozen, false, "three consecutive fails latch the window but 750ms have not elapsed");
+snapshot = freezeService.processPoseSample(pose(7250, { right_wrist: { x: 0.46, y: 0.58, confidence: 0.2 } }));
+assert.equal(snapshot.tracking.gameplayPaused, false, "calibrated loss freezes the anchors instead of pausing gameplay");
+assert.equal(snapshot.tracking.anchorsFrozen, true, "sustained calibrated loss enters the anchor freeze");
+assert.equal(snapshot.tracking.freshCalibrationRequired, false, "the freeze never requires a fresh calibration");
+assert.equal(snapshot.calibration.state, "tracking_lost", "the grid debug dim follows the tracking-lost state");
+assert.equal(snapshot.calibration.readiness, "countdown", "readiness stays countdown through the freeze");
+assert.equal(snapshot.calibration.calibrationId, beforeFreezeId, "the freeze keeps the calibration generation");
 assert.equal(snapshot.retainedGeometryDimmed, true);
-assert.equal(snapshot.countdownFrozen, true);
+assert.equal(snapshot.countdownFrozen, false, "the countdown is not frozen while the session keeps playing");
+assert.deepEqual(snapshot.tracking.degradedAnchors, ["right_wrist"]);
+const frozenEvidence = snapshot.latestEvidence;
+assert.ok(frozenEvidence && isGameplayEvidenceSnapshot(frozenEvidence));
+assert.equal(frozenEvidence.provenance, "frozen");
+assert.equal(frozenEvidence.frozenTickId, 1, "the first frozen publication carries per-tick identity 1");
+assert.equal(frozenEvidence.measurementTimestampMs, beforeFreezeEvidence.measurementTimestampMs, "frozen frames repeat the last measured frame's timestamp");
+assert.equal(frozenEvidence.measuredSourceFrameId, beforeFreezeEvidence.measuredSourceFrameId, "frozen frames repeat the last measured frame's identity");
+assert.equal(frozenEvidence.calibrationId, beforeFreezeId);
+assert.deepEqual(frozenEvidence.activeBoxingActions, [], "frozen frames mint no new semantic actions");
+assert.deepEqual(frozenEvidence.entries, [], "frozen frames mint no new cell entries");
+assert.equal(JSON.stringify(snapshot.anchors), beforeFreeze, "failing frames never clobber the held anchor positions");
+assert.ok(snapshot.anchors.every(isBodyGridAnchorSnapshot));
+assert.equal(JSON.stringify(frozenEvidence.anchors), beforeFreeze, "the held evidence keeps the last good frame's positions");
 
-// Partial auto-recovery: the three loss-decision anchors visible and stable for
-// 300ms of measured time clear freshCalibrationRequired WITHOUT recalibrating.
-const beforeRecovery = JSON.stringify(service.getSnapshot().calibration.bounds);
-const beforeRecoveryId = service.getSnapshot().calibration.calibrationId;
-service.processPoseSample(pose(13000, releasedChanges));
-const duringRecovery = service.getSnapshot();
-assert.equal(duringRecovery.tracking.gameplayPaused, true, "the session stays paused while the recovery hold accumulates");
-assert.equal(duringRecovery.tracking.freshCalibrationRequired, true, "the recovery hold has not yet reached 300ms");
-assert.equal(duringRecovery.tracking.recoveryInProgress, true, "recovery-in-progress is exposed semantically");
-service.processPoseSample(pose(13300, releasedChanges));
-const partialRecovered = service.getSnapshot();
-assert.equal(partialRecovered.calibration.calibrationId, beforeRecoveryId, "recovery does not mint a new calibrationId");
-assert.equal(JSON.stringify(partialRecovered.calibration.bounds), beforeRecovery, "recovery keeps bounds byte-identical");
-assert.equal(partialRecovered.tracking.gameplayPaused, false);
-assert.equal(partialRecovered.tracking.freshCalibrationRequired, false);
-assert.equal(partialRecovered.tracking.recoveryInProgress, false);
-assert.equal(partialRecovered.calibration.readiness, "countdown");
-assert.equal(partialRecovered.calibration.state, "calibrated");
-assert.ok(partialRecovered.latestEvidence, "evidence resumes immediately after partial recovery");
+// Failing frames while frozen keep the freeze, advance the per-tick identity and
+// never clobber the held positions. An anchor that recovers above the gate leaves
+// the degraded set while the freeze continues.
+snapshot = freezeService.processPoseSample(pose(7500, { nose: { x: 0.5, y: 0.3, confidence: 0.2 }, right_wrist: { x: 0.46, y: 0.58, confidence: 0.2 } }));
+assert.equal(snapshot.tracking.anchorsFrozen, true, "a further failing frame keeps the freeze");
+assert.deepEqual(snapshot.tracking.degradedAnchors, ["nose", "right_wrist"], "a second lost anchor joins the degraded set");
+assert.equal(snapshot.latestEvidence.frozenTickId, 2, "each frozen publication increments the per-tick identity");
+assert.equal(snapshot.latestEvidence.measurementTimestampMs, beforeFreezeEvidence.measurementTimestampMs);
+assert.equal(JSON.stringify(snapshot.anchors), beforeFreeze);
+snapshot = freezeService.processPoseSample(pose(7750, { right_wrist: { x: 0.46, y: 0.58, confidence: 0.2 } }));
+assert.deepEqual(snapshot.tracking.degradedAnchors, ["right_wrist"], "an anchor back above the gate leaves the degraded set");
+assert.equal(snapshot.latestEvidence.frozenTickId, 3);
+// A no-frame tick while frozen also advances the held-evidence publication.
+snapshot = freezeService.advanceTime(8000);
+assert.equal(snapshot.tracking.anchorsFrozen, true, "no-frame ticks keep the freeze");
+assert.equal(snapshot.latestEvidence.frozenTickId, 4, "advanceTime ticks the held-evidence publication");
+assert.equal(snapshot.latestEvidence.provenance, "frozen");
+assert.equal(JSON.stringify(snapshot.anchors), beforeFreeze, "advanceTime never touches the held anchors");
 
-// (e) A recovery hold interrupted by one bad sample restarts from zero.
+// Resume: the very next passing sample clears the freeze — no hold, no gesture,
+// no T-pose — and measured evidence resumes on the same calibration.
+snapshot = freezeService.processPoseSample(pose(8250, releasedChanges));
+assert.equal(snapshot.tracking.anchorsFrozen, false, "the next passing sample clears the freeze immediately");
+assert.equal(snapshot.tracking.gameplayPaused, false);
+assert.equal(snapshot.tracking.freshCalibrationRequired, false);
+assert.deepEqual(snapshot.tracking.degradedAnchors, []);
+assert.equal(snapshot.calibration.readiness, "countdown");
+assert.equal(snapshot.calibration.state, "calibrated");
+assert.equal(snapshot.calibration.calibrationId, beforeFreezeId, "resume does not mint a new calibration");
+assert.ok(snapshot.latestEvidence && isGameplayEvidenceSnapshot(snapshot.latestEvidence));
+assert.equal(snapshot.latestEvidence.provenance, "measured", "measured evidence resumes immediately");
+assert.equal(snapshot.latestEvidence.measurementTimestampMs, 8250);
+assert.ok(snapshot.latestEvidence.frozenTickId === undefined, "measured frames carry no frozen-tick identity");
+
+// (e) Anti-flicker: a single bad sample never (re-)enters the freeze, and the
+// freeze only latches after 3 consecutive fails spanning 750ms. The freeze is
+// cleared by the very next passing sample.
 const interruptService = createAeroBodyGridService({ calibrationIdPrefix: "interrupt" });
 calibrate(interruptService, 0);
 for (let at = 2500; at <= 6250; at += 250) {
   interruptService.processPoseSample(pose(at, releasedChanges));
 }
-// Three consecutive fails latch and pause.
+// One, two, then three consecutive fails: only the third latches the window but
+// 750ms have not elapsed yet, so no freeze.
 interruptService.processPoseSample(pose(6500, { right_wrist: { x: 0.46, y: 0.58, confidence: 0.2 } }));
+assert.equal(interruptService.getSnapshot().tracking.anchorsFrozen, false, "a single dropped sample cannot enter the freeze");
 interruptService.processPoseSample(pose(6750, { right_wrist: { x: 0.46, y: 0.58, confidence: 0.2 } }));
 interruptService.processPoseSample(pose(7000, { right_wrist: { x: 0.46, y: 0.58, confidence: 0.2 } }));
+assert.equal(interruptService.getSnapshot().tracking.anchorsFrozen, false, "the window latches at three fails but 750ms have not elapsed");
+// The fourth fail reaches 750ms: the freeze engages (not a pause).
 interruptService.processPoseSample(pose(7250, { right_wrist: { x: 0.46, y: 0.58, confidence: 0.2 } }));
-assert.equal(interruptService.getSnapshot().tracking.gameplayPaused, true);
-// Recovery starts at 7500.
+assert.equal(interruptService.getSnapshot().tracking.anchorsFrozen, true, "sustained loss enters the freeze");
+assert.equal(interruptService.getSnapshot().tracking.gameplayPaused, false, "the freeze does not pause gameplay");
+// A passing sample clears the freeze on the very next good frame (no hold).
 interruptService.processPoseSample(pose(7500, releasedChanges));
-assert.equal(interruptService.getSnapshot().tracking.recoveryInProgress, true, "recovery hold starts on the first good sample");
-// Interrupt at 7600.
+assert.equal(interruptService.getSnapshot().tracking.anchorsFrozen, false, "the passing sample clears the freeze immediately");
+assert.equal(interruptService.getSnapshot().latestEvidence.provenance, "measured");
+// A single bad sample after resume restarts the hysteresis clock (no re-freeze).
 interruptService.processPoseSample(pose(7600, { right_wrist: { x: 0.46, y: 0.58, confidence: 0.2 } }));
-assert.equal(interruptService.getSnapshot().tracking.recoveryInProgress, false, "one bad sample interrupts the recovery hold");
-// Recovery restarts at 7700.
+assert.equal(interruptService.getSnapshot().tracking.anchorsFrozen, false, "one post-resume bad sample restarts the hysteresis clock");
 interruptService.processPoseSample(pose(7700, releasedChanges));
-assert.equal(interruptService.getSnapshot().tracking.recoveryInProgress, true, "the restarted hold counts from the new start");
-// The restarted hold needs a full 300ms: 7700→8000 is 300ms.
-interruptService.processPoseSample(pose(7999, releasedChanges));
-assert.equal(interruptService.getSnapshot().tracking.freshCalibrationRequired, true, "the restarted hold has not yet reached 300ms");
-interruptService.processPoseSample(pose(8000, releasedChanges));
-assert.equal(interruptService.getSnapshot().tracking.freshCalibrationRequired, false, "the restarted 300ms hold still clears the requirement");
+assert.equal(interruptService.getSnapshot().tracking.anchorsFrozen, false);
 
 // Full T-pose calibration remains available and is the invalidation path for source changes.
-for (let at = 13500; at <= 14250; at += 250) {
+for (let at = 14000; at <= 14250; at += 250) {
   service.processPoseSample(pose(at, releasedChanges));
 }
 snapshot = calibrate(service, 14500);
@@ -429,15 +479,25 @@ assert.ok(shoulderDropout.getFreshEvidence(9200), "evidence stays fresh through 
 
 // Gap-based trigger: a whole silent window latches instantly, but pre-latch
 // silence (fresh source, one advanceTime before any measured fail) does not.
+// Calibrated, the third missed tick enters the anchor freeze (no pause) and the
+// held frame is published as frozen evidence.
 const gapSilent = createAeroBodyGridService({ calibrationIdPrefix: "gap-silent" });
 calibrate(gapSilent, 0);
 for (let at = 2500; at <= 6250; at += 250) {
   gapSilent.processPoseSample(pose(at, releasedChanges));
 }
 assert.equal(gapSilent.advanceTime(7250).tracking.gameplayPaused, false, "one pre-latch missed tick cannot trip the loss window");
+assert.equal(gapSilent.getSnapshot().tracking.anchorsFrozen, false, "one pre-latch missed tick does not freeze the anchors");
 assert.equal(gapSilent.advanceTime(7500).tracking.gameplayPaused, false, "two pre-latch missed ticks still cannot trip the loss window");
-assert.equal(gapSilent.advanceTime(7750).tracking.gameplayPaused, true, "three consecutive missed ticks latch and hold 750ms of measured loss");
-assert.equal(gapSilent.getSnapshot().latestEvidence, null);
+const gapSilentFrozen = gapSilent.advanceTime(7750);
+assert.equal(gapSilentFrozen.tracking.gameplayPaused, false, "the freeze does not pause gameplay");
+assert.equal(gapSilentFrozen.tracking.anchorsFrozen, true, "three consecutive missed ticks latch and enter the anchor freeze");
+assert.equal(gapSilentFrozen.tracking.freshCalibrationRequired, false, "the freeze does not require fresh calibration");
+assert.deepEqual(gapSilentFrozen.tracking.degradedAnchors, ["nose", "left_wrist", "right_wrist"], "a no-frame trigger counts every loss-decision anchor as degraded");
+assert.equal(gapSilentFrozen.latestEvidence?.provenance, "frozen", "the held frame is published as frozen evidence");
+assert.equal(gapSilentFrozen.latestEvidence?.frozenTickId, 1);
+assert.equal(gapSilentFrozen.anchors.length, 7, "anchors are retained at their last positions while frozen");
+assert.ok(gapSilentFrozen.anchors.every((anchor) => anchor.valid), "held anchors keep their last valid positions");
 
 const explicitReset = createAeroBodyGridService({ calibrationIdPrefix: "explicit-reset" });
 calibrate(explicitReset, 0);
@@ -459,10 +519,14 @@ for (let at = 2500; at <= 6250; at += 250) {
   }));
 }
 assert.equal(timeoutService.advanceTime(6500).tracking.gameplayPaused, false, "a first missed tick before the latch does not pause");
-assert.equal(timeoutService.advanceTime(6750).tracking.gameplayPaused, false, "a second missed tick still cannot trip the loss window");
+assert.equal(timeoutService.advanceTime(6750).tracking.anchorsFrozen, false, "a second missed tick still cannot trip the loss window");
 snapshot = timeoutService.advanceTime(7000);
-assert.equal(snapshot.tracking.gameplayPaused, true, "three consecutive no-frame misses latch and hold 750ms of measured loss");
-assert.equal(snapshot.latestEvidence, null);
+assert.equal(snapshot.tracking.gameplayPaused, false, "the freeze does not pause a calibrated session");
+assert.equal(snapshot.tracking.anchorsFrozen, true, "three consecutive no-frame misses latch and enter the anchor freeze");
+assert.equal(snapshot.tracking.freshCalibrationRequired, false);
+assert.equal(snapshot.latestEvidence?.provenance, "frozen", "the held frame is republished as frozen evidence");
+assert.equal(snapshot.latestEvidence?.frozenTickId, 1);
+assert.equal(snapshot.anchors.length, 7, "anchors are retained at their last positions while frozen");
 
 const averagedService = createAeroBodyGridService({ calibrationIdPrefix: "average" });
 for (let index = 0; index <= 8; index += 1) {
@@ -595,12 +659,17 @@ for (let at = 2500; at <= 6250; at += 250) {
   noFrameAnchors.processPoseSample(pose(at, releasedChanges));
 }
 assert.ok(noFrameAnchors.getSnapshot().anchors.some((anchor) => anchor.valid));
+const noFrameHistoryBefore = noFrameAnchors.getEvidenceHistory().length;
 noFrameAnchors.advanceTime(6500);
 noFrameAnchors.advanceTime(6750);
 snapshot = noFrameAnchors.advanceTime(7000);
-assert.equal(snapshot.tracking.gameplayPaused, true, "three consecutive no-frame ticks latch the loss window");
-assert.equal(snapshot.anchors.length, 0, "no-frame pause removes stale gameplay-valid anchors");
-assert.equal(noFrameAnchors.getEvidenceHistory().length, 0);
+assert.equal(snapshot.tracking.anchorsFrozen, true, "three consecutive no-frame ticks latch the freeze window");
+assert.equal(snapshot.tracking.gameplayPaused, false, "the freeze does not pause the session");
+assert.equal(snapshot.anchors.length, 7, "the no-frame freeze retains the last known anchors");
+assert.ok(snapshot.anchors.every((anchor) => anchor.valid), "retained anchors keep their last valid positions");
+assert.equal(snapshot.latestEvidence?.provenance, "frozen");
+assert.equal(noFrameAnchors.getEvidenceHistory().length, noFrameHistoryBefore, "frozen publications never enter the measured evidence history");
+assert.ok(noFrameAnchors.getEvidenceHistory().every((entry) => entry.provenance === "measured"), "the measured evidence history stays measured-only");
 
 let listenerErrors = 0;
 let healthyListenerCalls = 0;

@@ -76,7 +76,7 @@ const minimumParallaxHeadroom = 1e-6;
  * @property {Readonly<Record<string, unknown>>} tracking Public tracking-safety contract.
  * @property {readonly AeroBodyGridAnchorSnapshot[]} anchors Latest measured anchors against retained geometry.
  * @property {readonly AeroBodyGridCellEntry[]} entries Entries produced by the latest measurement.
- * @property {AeroGameplayEvidenceSnapshot | null} latestEvidence Latest valid measured evidence.
+ * @property {AeroGameplayEvidenceSnapshot | null} latestEvidence Latest evidence: the most recent measured frame, or — while `tracking.anchorsFrozen` is true — the held last-measured frame republished under `provenance:"frozen"` with an incrementing `frozenTickId`.
  * @property {readonly AeroStraightQualificationSnapshot[]} straightQualifications Measured continuity state.
  * @property {boolean} retainedGeometryDimmed Whether retained geometry must be displayed dimmed.
  * @property {boolean} countdownFrozen Whether tracking safety freezes countdown time.
@@ -88,7 +88,7 @@ const minimumParallaxHeadroom = 1e-6;
  * @typedef {Object} AeroBodyGridService
  * @property {"aero.input.body-grid"} serviceId Service ID.
  * @property {(sample: AeroPoseRoutingSample | NormalizedPoseFrame, context?: AeroBodyGridSampleContext) => AeroBodyGridServiceSnapshot} processPoseSample Process one measured or explicitly predicted sample.
- * @property {(timestampMs: number) => AeroBodyGridServiceSnapshot} advanceTime Detect no-frame tracking loss without inventing pose evidence.
+ * @property {(timestampMs: number) => AeroBodyGridServiceSnapshot} advanceTime Detect no-frame tracking loss without inventing pose evidence. While the anchors are frozen, also ticks the held-evidence publication (new frozenTickId) without touching the anchors.
  * @property {(reason?: string) => AeroBodyGridServiceSnapshot} resetCalibration Explicitly invalidate and retain dim geometry pending replacement.
  * @property {(timestampMs: number, maximumAgeMs?: number) => AeroGameplayEvidenceSnapshot | null} getFreshEvidence Return current measured evidence only when safe and fresh.
  * @property {() => readonly AeroGameplayEvidenceSnapshot[]} getEvidenceHistory Return bounded immutable measured history.
@@ -163,6 +163,14 @@ export function createAeroBodyGridService(options = {}) {
   let lastMeasuredAt = /** @type {number | null} */ (null);
   let lastMeasuredSourceFrameKey = /** @type {string | null} */ (null);
   let lossDurationMs = 0;
+  // 0.0.60 F4 anchor freeze (calibrated mid-run loss): the session keeps
+  // playing, anchors hold their last positions, and the last measured frame is
+  // republished as provenance:"frozen" evidence with a per-tick identity.
+  let anchorsFrozen = false;
+  let frozenTickId = 0;
+  let heldEvidence = /** @type {AeroGameplayEvidenceSnapshot | null} */ (null);
+  /** Loss-decision anchors currently below requiredConfidence (drives the per-marker dim). */
+  let degradedAnchors = /** @type {AeroUpperBodyAnchorName[]} */ ([]);
   let recoveryHoldStartedAt = /** @type {number | null} */ (null);
   let recoveryHoldElapsedMs = 0;
   let recoveryInProgress = false;
@@ -214,6 +222,8 @@ export function createAeroBodyGridService(options = {}) {
       allRequiredAnchorsVisible,
       gameplayPaused: trackingPaused,
       freshCalibrationRequired,
+      anchorsFrozen,
+      degradedAnchors: [...degradedAnchors],
       recoveryInProgress
     };
     return deepFreeze({
@@ -261,7 +271,15 @@ export function createAeroBodyGridService(options = {}) {
     }
   }
 
-  /** @param {string} reason */
+  /**
+   * Full calibration invalidation: source change, manual reset, or an
+   * uncalibrated tracking loss. A CALIBRATED mid-run tracking loss never
+   * reaches this function — triggerTrackingPause routes it to
+   * enterTrackingFreeze instead, because the anchor freeze keeps the
+   * calibration, its bounds, and its latest anchors intact.
+   *
+   * @param {string} reason
+   */
   function invalidateCalibration(reason) {
     calibrationState = reason === "tracking_lost" ? "tracking_lost" : "invalidated";
     readiness = reason === "tracking_lost" ? "paused_tracking" : "calibration_required";
@@ -279,16 +297,117 @@ export function createAeroBodyGridService(options = {}) {
     // badge resets, and other invalidations require a full T-pose recalibration
     // because the geometry itself has changed.
     recoveryArmed = reason === "tracking_lost" && bounds !== null;
+    // A full invalidation voids any in-flight anchor freeze (the held frame
+    // belonged to a calibration generation that is going away).
+    anchorsFrozen = false;
+    frozenTickId = 0;
+    degradedAnchors = [];
+    heldEvidence = null;
     resetLossAndRecoveryClocks();
     resetMeasuredHistories();
   }
 
-  /** @param {number} sampleTimestamp */
+  /**
+   * Enter the anchor freeze (0.0.60 F4, calibrated mid-run loss). Consequence
+   * of the tracking-loss gate CHANGES from pause to freeze when calibrated:
+   * - readiness stays "countdown"; trackingPaused and freshCalibrationRequired
+   *   stay false; the calibration generation and bounds are untouched;
+   * - latestAnchors and the held frame keep the last measured positions, so
+   *   the markers freeze at their last location;
+   * - calibrationState reads "tracking_lost" so the grid's retained-geometry
+   *   debug dim applies, while the per-marker dim reads degradedAnchors;
+   * - the last measured frame is republished as provenance:"frozen" evidence
+   *   on every subsequent tick, so scoring stays live on the held positions.
+   *
+   * The degraded set comes from the caller: a failing measured sample
+   * already refreshed it from the current frame's confidences, a no-frame
+   * trigger keeps the last measured set, and an empty set (player absent,
+   * nothing below-gate on record) counts every loss-decision anchor as
+   * degraded.
+   */
+  function enterTrackingFreeze() {
+    anchorsFrozen = true;
+    frozenTickId = 0;
+    calibrationState = "tracking_lost";
+    // Markers freeze at their last position: the failing frame that tripped
+    // the gate (or the preceding failing frames) already left invalid anchor
+    // entries in the live list, so restore the held frame's anchors for the
+    // published snapshot. The held anchor snapshots are the byte-identical
+    // objects the good frame originally published.
+    if (heldEvidence !== null) {
+      latestAnchors = heldEvidence.anchors;
+    }
+    if (degradedAnchors.length === 0) {
+      degradedAnchors = [...lossDecisionAnchorNames];
+    }
+  }
+
+  /**
+   * Exit the anchor freeze on the first passing sample (all loss-decision
+   * anchors back above the gate): normal measured frames resume on the very
+   * next good frame — no hold, no gesture, no T-pose. updateCalibration then
+   * reconciles the calibration state (restoring "cooldown" if the
+   * post-calibration window is still open).
+   */
+  function clearTrackingFreeze() {
+    anchorsFrozen = false;
+    frozenTickId = 0;
+    degradedAnchors = [];
+    calibrationState = "calibrated";
+    readiness = "countdown";
+  }
+
+  /**
+   * Republish the held last-measured frame as the latest evidence under a
+   * fresh per-tick identity. The held position data, calibrationId,
+   * measuredSourceFrameId, and measurementTimestampMs stay byte-identical to
+   * the last measured frame (a frozen frame is never a re-stamped measured
+   * frame); only frozenTickId advances, so every frozen publication is a
+   * distinct per-tick identity the coordinator can re-evaluate new events
+   * against. Frozen frames carry no new semantic or motion evidence, and
+   * they never enter the measured evidence history.
+   */
+  function publishFrozenEvidence() {
+    if (heldEvidence === null || calibrationId === null) {
+      return;
+    }
+    frozenTickId += 1;
+    latestEvidence = deepFreeze({
+      schema: "aerobeat/gameplay_evidence_snapshot",
+      version: 1,
+      calibrationId,
+      measuredSourceFrameId: heldEvidence.measuredSourceFrameId,
+      measurementTimestampMs: heldEvidence.measurementTimestampMs,
+      provenance: "frozen",
+      frozenTickId,
+      activeBoxingActions: [],
+      anchors: heldEvidence.anchors,
+      entries: []
+    });
+  }
+
+  /**
+   * The tracking-loss gate has tripped. Calibrated (bounds published and a
+   * held frame available): enter the anchor freeze instead of pausing.
+   * Uncalibrated (or no held frame): the old full-pause +
+   * fresh-calibration path, unchanged.
+   *
+   * @param {number} sampleTimestamp
+   */
   function triggerTrackingPause(sampleTimestamp) {
     timestampMs = Math.max(timestampMs, sampleTimestamp);
-    trackingPaused = true;
     lossDurationMs = Math.max(calibrationDefaults.trackingLossPauseMs, lossDurationMs);
-    invalidateCalibration("tracking_lost");
+    if (bounds === null || heldEvidence === null) {
+      trackingPaused = true;
+      invalidateCalibration("tracking_lost");
+      return;
+    }
+    if (anchorsFrozen) {
+      // Already frozen: the gate stays latched and the loss window keeps
+      // counting; the per-tick republish happens at the publish sites.
+      return;
+    }
+    enterTrackingFreeze();
   }
 
   /** Resets both loss and recovery hysteresis clocks. */
@@ -376,10 +495,20 @@ export function createAeroBodyGridService(options = {}) {
       lossStartedAt = null;
       lossConsecutiveFails = 0;
       lossDurationMs = 0;
-      if (freshCalibrationRequired && recoveryArmed) {
+      degradedAnchors = [];
+      if (anchorsFrozen) {
+        // 0.0.60 F4: the very next good frame clears the anchor freeze — no
+        // hold, no gesture, no T-pose. Normal measured frames resume from
+        // this sample.
+        clearTrackingFreeze();
+      } else if (freshCalibrationRequired && recoveryArmed) {
         updateRecoveryHold(sample.measurementTimestampMs);
       }
     } else {
+      // The per-anchor degraded set tracks the latest measured frame even
+      // before the freeze latches, so the per-marker dim shows the dropout
+      // as it happens; an anchor leaves the set when it passes again.
+      degradedAnchors = degradedSetFromLandmarks(landmarks);
       lossConsecutiveFails += 1;
       lossStartedAt ??= sample.measurementTimestampMs;
       lossDurationMs = Math.max(0, sample.measurementTimestampMs - lossStartedAt);
@@ -566,6 +695,13 @@ export function createAeroBodyGridService(options = {}) {
         subcell: inGrid ? subcell : null
       });
     }
+    if (anchorsFrozen) {
+      // Freeze: failing/absent frames never clobber the held anchors or
+      // positions. Republish the held frame under a fresh per-tick identity
+      // so the coordinator keeps re-evaluating new events against it.
+      publishFrozenEvidence();
+      return;
+    }
     latestAnchors = anchors;
     latestEntries = entries;
     if (scoringValid) {
@@ -588,6 +724,10 @@ export function createAeroBodyGridService(options = {}) {
       anchors,
       entries
     });
+    // The measured frame just published becomes the frame a future anchor
+    // freeze would hold (held separately from latestEvidence, which a
+    // failing frame may already have nulled by the time the gate trips).
+    heldEvidence = latestEvidence;
     evidenceHistory.push(latestEvidence);
     if (evidenceHistory.length > historyCapacity) {
       evidenceHistory.splice(0, evidenceHistory.length - historyCapacity);
@@ -784,6 +924,7 @@ export function createAeroBodyGridService(options = {}) {
     latestAnchors = [];
     latestEntries = [];
     latestEvidence = null;
+    heldEvidence = null;
     evidenceHistory.length = 0;
   }
 
@@ -805,6 +946,12 @@ export function createAeroBodyGridService(options = {}) {
     if (lossConsecutiveFails >= trackingLossHysteresisConsecutiveFails &&
         lossDurationMs >= calibrationDefaults.trackingLossPauseMs) {
       triggerTrackingPause(nextTimestamp);
+    }
+    if (anchorsFrozen) {
+      // Frozen: tick the held-evidence publication (fresh per-tick identity)
+      // and keep counting the loss window; the anchors themselves are never
+      // touched by a no-frame tick.
+      publishFrozenEvidence();
     }
     return publish();
   }
@@ -838,6 +985,10 @@ export function createAeroBodyGridService(options = {}) {
     invalidationReason = "destroyed";
     trackingPaused = true;
     freshCalibrationRequired = true;
+    anchorsFrozen = false;
+    frozenTickId = 0;
+    degradedAnchors = [];
+    heldEvidence = null;
     latestEvidence = null;
     latestMeasuredNoseParallax = null;
     baselineNose = null;
@@ -946,6 +1097,22 @@ function normalizeSample(input) {
   } catch {
     return null;
   }
+}
+
+/**
+ * The loss-decision anchors that are below the required confidence in a
+ * measured frame — the per-anchor degraded set that drives the per-marker
+ * dim. Returns an empty list for a null landmark map, or when every
+ * loss-decision anchor passes the confidence gate.
+ *
+ * @param {Map<string, NormalizedPoseLandmark> | null} landmarks
+ * @returns {AeroUpperBodyAnchorName[]}
+ */
+function degradedSetFromLandmarks(landmarks) {
+  if (landmarks === null) {
+    return [];
+  }
+  return lossDecisionAnchorNames.filter((name) => (landmarks.get(name)?.confidence ?? 0) < calibrationDefaults.requiredConfidence);
 }
 
 /** @param {AeroPoseRoutingSample} sample @returns {Map<string, NormalizedPoseLandmark>} */
