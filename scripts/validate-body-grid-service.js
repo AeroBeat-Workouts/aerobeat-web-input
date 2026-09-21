@@ -163,9 +163,14 @@ const outside = pose(11300, {
 });
 snapshot = service.processPoseSample(outside);
 const outsideNose = snapshot.anchors.find((anchor) => anchor.anchor === "nose");
-assert.equal(outsideNose?.valid, false);
-assert.equal(outsideNose?.cell, null);
-assert.ok((outsideNose?.rawX ?? 0) > 1, "unclamped diagnostics survive out-of-grid invalidity");
+// D1(b): an off-grid but confident anchor stays staged — valid by signal
+// validity with finite x/y — while still carrying no scoring cell/subcell.
+assert.equal(outsideNose?.valid, true, "an off-grid confident anchor stays staged (valid by signal validity)");
+assert.ok(Number.isFinite(outsideNose?.x ?? NaN), "the off-grid anchor keeps its normalized x for staging");
+assert.ok(Number.isFinite(outsideNose?.y ?? NaN), "the off-grid anchor keeps its normalized y for staging");
+assert.equal(outsideNose?.cell, null, "the off-grid anchor never occupies a scoring cell");
+assert.equal(outsideNose?.subcell, null, "the off-grid anchor never occupies a scoring subcell");
+assert.ok((outsideNose?.rawX ?? 0) > 1, "unclamped diagnostics survive out-of-grid staging");
 
 // Outside-to-grid produces no synthetic entry; a later cardinal transition does.
 service.processPoseSample(pose(11400, {
@@ -433,6 +438,30 @@ for (let at = 7500; at <= 9500; at += 250) {
   holdInterrupt.processPoseSample(pose(at));
 }
 assert.equal(holdInterrupt.getSnapshot().calibration.calibrationId, "hold-interrupt-2", "a fresh uninterrupted hold after the interruption still commits");
+
+// D1(b): a wrist placed OUTSIDE the calibrated grid bounds but still visible
+// with confidence >= requiredConfidence keeps staging (valid, finite x/y, no
+// scoring cell/subcell) and triggers no pause or invalidation.
+const offGridService = createAeroBodyGridService({ calibrationIdPrefix: "off-grid" });
+calibrate(offGridService, 0);
+for (let at = 2500; at <= 6250; at += 250) {
+  offGridService.processPoseSample(pose(at, releasedChanges));
+}
+snapshot = offGridService.processPoseSample(pose(6500, {
+  ...releasedChanges,
+  left_wrist: { x: 1.0, y: 0.5 } // camera x=1.0 -> athlete x=0.0 -> raw -0.333, well past the left grid edge
+}));
+const offGridWrist = snapshot.anchors.find((anchor) => anchor.anchor === "left_wrist");
+assert.ok(offGridWrist, "the off-grid wrist anchor is present in the snapshot");
+assert.equal(offGridWrist.valid, true, "the off-grid wrist stays staged by signal validity");
+assert.ok(Number.isFinite(offGridWrist.x) && Number.isFinite(offGridWrist.y), "the off-grid wrist keeps finite staging coordinates");
+assert.equal(offGridWrist.cell, null, "the off-grid wrist occupies no scoring cell");
+assert.equal(offGridWrist.subcell, null, "the off-grid wrist occupies no scoring subcell");
+assert.equal(snapshot.tracking.gameplayPaused, false, "going off-grid never pauses gameplay");
+assert.equal(snapshot.tracking.freshCalibrationRequired, false, "going off-grid never requires a fresh calibration");
+assert.equal(snapshot.tracking.anchorsFrozen, false, "going off-grid never enters the anchor freeze");
+assert.equal(snapshot.calibration.state, "calibrated", "going off-grid leaves the calibration state untouched");
+assert.equal(offGridWrist.anchor, "left_wrist");
 
 // Full T-pose calibration remains available and is the invalidation path for source changes.
 for (let at = 14000; at <= 14250; at += 250) {

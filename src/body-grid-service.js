@@ -664,18 +664,23 @@ export function createAeroBodyGridService(options = {}) {
       const cell = signalValid ? hystereticGridCell(raw, athleteBodyGrid4x3, history.cell, hysteresisRatio) : null;
       const subcell = signalValid ? hystereticGridCell(raw, athleteBodySubgrid8x6, history.subcell, hysteresisRatio) : null;
       const inGrid = signalValid && normalizedPointToGridCell(raw, athleteBodyGrid4x3) !== null;
+      // D1(b): off-grid anchors are now staged — valid follows signal validity
+      // (scoringValid + confidence gate) with finite raw x/y, so the app keeps
+      // rendering and tracking the marker and its equipment outside the
+      // calibrated grid. cell/subcell stay gated on inGrid, so an off-grid
+      // point can never occupy a grid cell or produce a scoring entry.
       const anchor = /** @type {AeroBodyGridAnchorSnapshot} */ ({
         schema: "aerobeat/body_grid_anchor_snapshot",
         version: 1,
         anchor: name,
         calibrationId,
         measurementTimestampMs: sample.measurementTimestampMs,
-        valid: inGrid,
+        valid: signalValid,
         confidence: clamp01(landmark.confidence),
         rawX: raw.x,
         rawY: raw.y,
-        x: inGrid ? raw.x : null,
-        y: inGrid ? raw.y : null,
+        x: signalValid ? raw.x : null,
+        y: signalValid ? raw.y : null,
         cell: inGrid ? cell?.id ?? null : null,
         subcell: inGrid ? subcell?.id ?? null : null
       });
