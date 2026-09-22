@@ -1,31 +1,31 @@
 // @ts-check
 
 // Proves the eight-way Flow direction behavior against the real
-// `flow_colliders_v1` scoring path. The 0.0.50 Flow Grid deletion retired the
-// `flow_grid_v2` semantic cell-entry matching this script was originally
-// written against; the previous lane re-pointed the fixture `rulesetId` to
-// `flow_colliders_v1` without rebuilding the fixture, so the run fell back to
-// the default collider settings (overlap-only) and produced no hits at all
-// (`ERR_ASSERTION actual: [] expected: [[ 'hit', [] ]]`).
+// `flow_colliders_v1` scoring path under the 0.0.61 L-F2 saber-capsule
+// detector. The swept 2.5D wrist-segment collision model this script was
+// originally written against is retired: `swept-segment` hit detection is
+// replaced by a per-frame saber-capsule test that reads the current wrist
+// sample and orients the beam from a 100 ms wrist-history direction oracle
+// (see `session-coordinator.js` `evaluateFlowColliderNotesAndBombs`,
+// ~:999-1069, and `flow-collider-collision.js` `saberDirectionFromWristHistory`,
+// `saberCapsuleContactsFlowTarget`, `matchesAuthoredDirection`).
 //
-// This rewrite drives the session coordinator
-// (`session-coordinator.js` `evaluateFlowColliderNotesAndBombs`, ~:752-794)
-// end to end with the real swept 2.5D wrist-segment collision
-// (`flow-collider-collision.js`):
+// This script drives the session coordinator end to end with the current
+// capsule detector:
 //
 //   1. enforceAuthoredDirection: true — each of the eight authored directions
 //      (up/down/left/right + the four diagonals, the BEAT_SABER_FLOW_DIRECTIONS
-//      order at session-coordinator.js:1546) produces exactly one clean hit,
+//      order at session-coordinator.js:1890) produces exactly one clean hit,
 //      and a crossing outside the 45° tolerance misses with `wrong_direction`.
 //   2. The 45° tolerance boundary is pinned on both sides: the check is
 //      `cosine + Number.EPSILON >= Math.cos(tolerance)`
-//      (flow-collider-collision.js:129), so exactly 45° is INCLUSIVE (hits)
+//      (flow-collider-collision.js:313), so exactly 45° is INCLUSIVE (hits)
 //      and just beyond it misses with `wrong_direction`.
 //   3. enforceAuthoredDirection: false — the same out-of-tolerance crossing
-//      still hits (direction ignored, overlap-only).
+//      still hits (direction gate skipped).
 //   4. A directionless cue (`direction` omitted) hits regardless of movement
-//      direction with the toggle ON (session-coordinator.js:779 gates on
-//      `event.direction !== undefined`).
+//      direction with the toggle ON (the direction gate is skipped when
+//      `event.direction === undefined`, session-coordinator.js:1053).
 //   5. Mode-isolation sanity: the score partition is bound to
 //      `flow_colliders_v1` with a `sha256:` Flow Collider settings identity.
 //
@@ -33,34 +33,45 @@
 //   * `configureContent` carries an exact v1 `flowColliderSettings` record
 //     (schema/version/algorithm/colliderRadius/enforceAuthoredDirection/
 //     directionToleranceDegrees/timingWindowMs — validated by
-//     `createFlowColliderSettings`, flow-collider-collision.js:16-44, and
-//     normalized at session-coordinator.js:1384-1391).
+//     `createFlowColliderSettings`, flow-collider-collision.js:35-46).
 //   * Every advance input carries `sourceIdentity` (a non-empty string).
 //     `measuredColliderSample` returns null without it
-//     (flow-collider-collision.js:67), so the whole collider path is skipped
-//     — the sibling gameplay fixture does the same
-//     (aerobeat-web-gameplay/scripts/validate-flow-collider-collision.js:14, 18).
+//     (flow-collider-collision.js:84), so the whole collider path is skipped.
 //
 // Coordinate note: the collision math works in measured athlete-grid
-// coordinates lifted to the swept collider plane as `sx = 4*x - 0.5`,
-// `sy = 2.5 - 3*y` (flow-collider-collision.js:74). In collider space `sy` is
-// UP, so an athlete "up" motion (y decreasing) is a `+sy` sweep. All
-// trajectories below are derived in collider space against the real
-// `DIRECTIONS` table (flow-collider-collision.js:54-58) and the target
-// footprint `targetCenterForPlacement(6)` = (2, 1)
-// (flow-collider-collision.js:78-80) with half-extent 0.375 + radius 0.12 =
-// 0.495, i.e. footprint sx ∈ [1.505, 2.495], sy ∈ [0.505, 1.495].
+// coordinates lifted to the judge plane as `sx = 4*x - 0.5`,
+// `sy = 2.5 - 3*y` (flow-collider-collision.js:96). In judge space `sy` is
+// UP, so an athlete "up" motion (y decreasing) is a `+sy` sweep. The target
+// for placement 6 is a 1×1 judge-space cell centered at (2, 1)
+// (`flowNoteCellBox`, flow-collider-collision.js:123-126). All trajectories
+// below are derived in judge space against the real `DIRECTIONS` table
+// (flow-collider-collision.js:61-65) and the saber capsule geometry
+// (length 0.75, radius 0.18, `saberGeometry` from
+// `@aerobeat/web-contracts/equipment-contracts`).
 //
-// Three-frame pattern: the first measured frame seeds the left-wrist baseline
-// (`leftWristBaselineRequired`, session-coordinator.js:766-767), the second
-// frame establishes `previousLeftWristSample`, and the third frame is the
-// first that can produce a swept-segment hit. Frames are 80ms apart in both
-// measurement time and song time, so each segment passes
-// `isContinuousColliderSegment` (gap ≤ maximumColliderSampleGapMs = 150ms,
-// flow-collider-collision.js:10, 115-117) and the sweep stays inside the
-// ±180ms timing window [4820, 5180] around the event center 5000ms. Each
-// swept segment is 1.0 unit long (above MINIMUM_DIRECTION_TRAVEL = 0.05,
-// flow-collider-collision.js:53) and clips through the footprint in time.
+// Frame-choreography pattern (saber-capsule era):
+//
+//   The capsule detector evaluates ONE frame at a time: the wrist sample
+//   `current` is checked against the 1×1 cell box with the saber axis
+//   `saberDirection = saberDirectionFromWristHistory(history, nowMs)` — a
+//   100 ms lookback over the prior wrist positions — and the authored
+//   direction gate uses `matchesAuthoredDirection(direction, prior, current,
+//   45°)`, where `prior` is the PREVIOUS measured sample. Because of this
+//   windowed oracle, the judged frame needs enough PRIOR samples in its
+//   100 ms window so the saber axis matches the authored direction. The
+//   four-frame clean-direction sweep (4760 → 4840 → 4920 → 5000 ms, 80 ms
+//   gaps) gives the judged frame (pos 4920) two samples inside the 100 ms
+//   window (4840 + 4920) so the saber axis resolves to the correct
+//   direction, AND gives `matchesAuthoredDirection` a valid `prior` from the
+//   immediately preceding frame. The first frame (4760) is a pure baseline
+//   seed (it is skipped by the coordinator's `leftWristBaselineRequired`
+//   path, session-coordinator.js:1028). Frames stay inside the ±180 ms
+//   timing window [4820, 5180] around the event center 5000 ms.
+//
+//   For the miss cases the judged frame is held well past the late window
+//   bound (pos 5300 > 5180) so the coordinator finalizes the miss with the
+//   `wrong_direction` diagnostic (`colliderMissDiagnostics`,
+//   session-coordinator.js:1139-1145).
 
 import assert from "node:assert/strict";
 import { isGameplayEvidenceSnapshot, isBodyGridAnchorSnapshot } from "@aerobeat/web-contracts";
@@ -246,86 +257,111 @@ function judgeFrame(coordinator, leftWrist, positionMs, wallMs, frameIndex) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// The eight authored directions and their three-frame trajectories.
+// The eight authored directions and their four-frame trajectories.
 //
-// Frame 1 is always at the target center (athlete 0.625, 0.5 = collider
-// sx = 2, sy = 1) — the baseline seed. Frames 2 and 3 form the swept segment,
-// oriented along the authored direction's own unit vector
-// (flow-collider-collision.js:54-58) with length 1.0:
+// Under the saber-capsule detector, the judged frame needs PRIOR wrist
+// positions inside the 100 ms direction-oracle window so the saber axis
+// matches the authored direction. Four frames (80 ms apart in both wall and
+// song time) give the judged frame two prior samples in-window and a valid
+// `prior` for `matchesAuthoredDirection`.
 //
-//   direction   frame 2 (athlete)    frame 3 (athlete)
-//   up          (0.625, 0.667) -> (0.625, 0.333)   [sx 2, sy 0.5->1.5]
-//   down        (0.625, 0.333) -> (0.625, 0.667)   [sx 2, sy 1.5->0.5]
-//   left        (0.750, 0.500) -> (0.500, 0.500)   [sy 1, sx 2.5->1.5]
-//   right       (0.500, 0.500) -> (0.750, 0.500)   [sy 1, sx 1.5->2.5]
-//   up-left     (0.713, 0.618) -> (0.537, 0.382)   [sx 2.354->1.646, sy 0.646->1.354]
-//   up-right    (0.537, 0.618) -> (0.713, 0.382)   [sx 1.646->2.354, sy 0.646->1.354]
-//   down-left   (0.713, 0.382) -> (0.537, 0.618)   [sx 2.354->1.646, sy 1.354->0.646]
-//   down-right  (0.537, 0.382) -> (0.713, 0.618)   [sx 1.646->2.354, sy 1.354->0.646]
+// Frame 1 is a baseline seed at the start of the sweep (athlete coordinates
+// at -0.5·dir from the cell center (2,1) in judge space). Frames 2 and 3
+// build up the motion; frame 3 (song time 4920 ms) is the judged frame and
+// lands inside the ±180 ms timing window. Frame 4 completes the sweep but is
+// never reached because the hit is recorded at frame 3.
 //
-// Wall timestamps: 3120 -> 3200 -> 3280 (80ms gaps, all fresh < 150ms).
-// Song timeline: 4920 -> 5000 -> 5080 (80ms gaps, all within [4820, 5180]).
+//   direction   frames 1→4 (athlete x, y)               song ms  wall ms
+//   up          (0.625,0.667)→(0.625,0.550)→(0.625,0.450)→(0.625,0.333)  4760 4840 4920 5000
+//   down        (0.625,0.333)→(0.625,0.450)→(0.625,0.550)→(0.625,0.667)  4760 4840 4920 5000
+//   left        (0.750,0.500)→(0.663,0.500)→(0.588,0.500)→(0.500,0.500)  4760 4840 4920 5000
+//   right       (0.500,0.500)→(0.588,0.500)→(0.663,0.500)→(0.750,0.500)  4760 4840 4920 5000
+//   up-left     (0.713,0.618)→(0.652,0.535)→(0.598,0.465)→(0.537,0.382)  4760 4840 4920 5000
+//   up-right    (0.537,0.618)→(0.598,0.535)→(0.652,0.465)→(0.713,0.382)  4760 4840 4920 5000
+//   down-left   (0.713,0.382)→(0.652,0.465)→(0.598,0.535)→(0.537,0.618)  4760 4840 4920 5000
+//   down-right  (0.537,0.382)→(0.598,0.465)→(0.652,0.535)→(0.713,0.618)  4760 4840 4920 5000
 // ─────────────────────────────────────────────────────────────────────────────
 
-const FRAME1 = Object.freeze({ x: 0.625, y: 0.5 }); // target center (baseline seed)
 const EIGHT_WAYS = Object.freeze([
-  Object.freeze(["up", 0, { x: 0.625, y: 0.667 }, { x: 0.625, y: 0.333 }]),
-  Object.freeze(["down", 1, { x: 0.625, y: 0.333 }, { x: 0.625, y: 0.667 }]),
-  Object.freeze(["left", 2, { x: 0.75, y: 0.5 }, { x: 0.5, y: 0.5 }]),
-  Object.freeze(["right", 3, { x: 0.5, y: 0.5 }, { x: 0.75, y: 0.5 }]),
-  Object.freeze(["up-left", 4, { x: 0.713, y: 0.618 }, { x: 0.537, y: 0.382 }]),
-  Object.freeze(["up-right", 5, { x: 0.537, y: 0.618 }, { x: 0.713, y: 0.382 }]),
-  Object.freeze(["down-left", 6, { x: 0.713, y: 0.382 }, { x: 0.537, y: 0.618 }]),
-  Object.freeze(["down-right", 7, { x: 0.537, y: 0.382 }, { x: 0.713, y: 0.618 }])
+  Object.freeze(["up", 0,
+    Object.freeze([{ x: 0.625, y: 0.6667 }, { x: 0.625, y: 0.55 }, { x: 0.625, y: 0.45 }, { x: 0.625, y: 0.3333 }])]),
+  Object.freeze(["down", 1,
+    Object.freeze([{ x: 0.625, y: 0.3333 }, { x: 0.625, y: 0.45 }, { x: 0.625, y: 0.55 }, { x: 0.625, y: 0.6667 }])]),
+  Object.freeze(["left", 2,
+    Object.freeze([{ x: 0.75, y: 0.5 }, { x: 0.6625, y: 0.5 }, { x: 0.5875, y: 0.5 }, { x: 0.5, y: 0.5 }])]),
+  Object.freeze(["right", 3,
+    Object.freeze([{ x: 0.5, y: 0.5 }, { x: 0.5875, y: 0.5 }, { x: 0.6625, y: 0.5 }, { x: 0.75, y: 0.5 }])]),
+  Object.freeze(["up-left", 4,
+    Object.freeze([{ x: 0.7134, y: 0.6179 }, { x: 0.6515, y: 0.5354 }, { x: 0.5985, y: 0.4646 }, { x: 0.5366, y: 0.3821 }])]),
+  Object.freeze(["up-right", 5,
+    Object.freeze([{ x: 0.5366, y: 0.6179 }, { x: 0.5985, y: 0.5354 }, { x: 0.6515, y: 0.4646 }, { x: 0.7134, y: 0.3821 }])]),
+  Object.freeze(["down-left", 6,
+    Object.freeze([{ x: 0.7134, y: 0.3821 }, { x: 0.6515, y: 0.4646 }, { x: 0.5985, y: 0.5354 }, { x: 0.5366, y: 0.6179 }])]),
+  Object.freeze(["down-right", 7,
+    Object.freeze([{ x: 0.5366, y: 0.3821 }, { x: 0.5985, y: 0.4646 }, { x: 0.6515, y: 0.5354 }, { x: 0.7134, y: 0.6179 }])])
 ]);
 
+// Four wall timestamps: 80 ms apart, starting at 4920 (well within the
+// ±180 ms timing window around the 5000 ms event center).
+const FRAME_WALLS = Object.freeze([4760, 4840, 4920, 5000]);
+// Song timeline mirrors the wall timestamps (position == wall in this fixture).
+const FRAME_SONG = Object.freeze([4760, 4840, 4920, 5000]);
+
 // ── (1a) enforceAuthoredDirection: true — each authored direction hits ──────
-for (const [name, direction, mid, end] of EIGHT_WAYS) {
+for (const [name, direction, frames] of EIGHT_WAYS) {
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: `hit-${name}` });
   readyGameplay(coordinator, flowEvent(`hit-${name}`, direction), flowColliderSettings);
-  judgeFrame(coordinator, FRAME1, 4920, 3120, 1);
-  judgeFrame(coordinator, mid, 5000, 3200, 2);
-  const judgements = judgeFrame(coordinator, end, 5080, 3280, 3);
+  // Frame 1: baseline seed (coordinator skips evaluation on the seed frame).
+  judgeFrame(coordinator, frames[0], FRAME_SONG[0], FRAME_WALLS[0], 1);
+  // Frame 2: first real sample — establishes the wrist-history window.
+  judgeFrame(coordinator, frames[1], FRAME_SONG[1], FRAME_WALLS[1], 2);
+  // Frame 3: the judged frame — prior is frames[1], the 100 ms window
+  // contains frames[1] (80 ms back), and the capsule contacts the cell.
+  const judgements = judgeFrame(coordinator, frames[2], FRAME_SONG[2], FRAME_WALLS[2], 3);
   assert.deepEqual(judgements, [["hit", []]], `${name} (authored ${direction}) is a single clean hit with empty diagnostics`);
   coordinator.destroy();
 }
 
 // ── (1b) out-of-tolerance crossing misses with `wrong_direction` ────────────
 // The authored `up` cue (direction 0) met by a purely horizontal (rightward)
-// sweep: the segment's deviation from the authored `up` vector is ~90°
-// (cosine ~0 << cos(45°)) -> not a hit while in-window. When the timeline
-// passes the late bound (center + 180ms = 5180ms, strict) the coordinator
-// finalizes a miss and emits `wrong_direction`
-// (session-coordinator.js:820, 838). The 5300ms miss frame deliberately moves
-// no wrist: a held wrist produces no segment (and no point contact here), so
-// the miss can only come from the direction-evidence path.
+// motion: each frame's step is ~90° off the authored `up` vector (cosine ~0
+// << cos(45°)), so `matchesAuthoredDirection` fails on every in-window frame
+// and no hit is produced. When the timeline passes the late bound (center +
+// 180ms = 5180ms, strict) the coordinator finalizes a miss and emits
+// `wrong_direction` (session-coordinator.js:1053, 1139-1145). The 5300ms
+// miss frame deliberately holds the wrist still: the held capsule no longer
+// contacts the cell, so the miss can only come from the direction-evidence
+// path.
 {
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "wrong-direction" });
   readyGameplay(coordinator, flowEvent("wrong-direction", 0), flowColliderSettings);
-  judgeFrame(coordinator, FRAME1, 4920, 3120, 1);
-  judgeFrame(coordinator, { x: 0.5, y: 0.5 }, 5000, 3200, 2);
-  assert.deepEqual(judgeFrame(coordinator, { x: 0.75, y: 0.5 }, 5080, 3280, 3), [], "an out-of-tolerance in-window crossing produces no judgement yet");
-  assert.deepEqual(judgeFrame(coordinator, { x: 0.75, y: 0.5 }, 5300, 3480, 4), [["miss", ["wrong_direction"]]], "an out-of-tolerance crossing finalizes as a miss with the wrong_direction diagnostic");
+  // Frames 1-4: rightward sweep (baseline seed, then 0.35-unit steps), no hit.
+  judgeFrame(coordinator, { x: 0.5, y: 0.5 }, 4760, 4760, 1);
+  judgeFrame(coordinator, { x: 0.5875, y: 0.5 }, 4840, 4840, 2);
+  assert.deepEqual(judgeFrame(coordinator, { x: 0.6625, y: 0.5 }, 4920, 4920, 3), [], "an out-of-tolerance in-window crossing produces no judgement yet");
+  judgeFrame(coordinator, { x: 0.75, y: 0.5 }, 5000, 5000, 4);
+  assert.deepEqual(judgeFrame(coordinator, { x: 0.75, y: 0.5 }, 5300, 5300, 5), [["miss", ["wrong_direction"]]], "an out-of-tolerance crossing finalizes as a miss with the wrong_direction diagnostic");
   coordinator.destroy();
 }
 
 // ── (2) tolerance boundary — inclusive at 45°, exclusive just beyond ────────
 // The tolerance check is `cosine + Number.EPSILON >= Math.cos(tolerance)`
-// (flow-collider-collision.js:129), so the boundary is INCLUSIVE. The sweep is
-// a 1.0-length segment (frame 2 -> frame 3) centered on the target, tilted to
-// the right of the authored `up` axis by the given angle:
-//   inclusive: direction (sin 45°, cos 45°) -> frame 2 (0.537,0.618) frame 3 (0.713,0.382)
-//   exclusive: direction (sin 48°, cos 48°) -> frame 2 (0.532,0.612) frame 3 (0.718,0.388)
-// (both segments still clip the footprint in time, so the only term that
-// changes between the two runs is the direction check).
+// (flow-collider-collision.js:313), so the boundary is INCLUSIVE. Each sweep
+// is a run of 0.35-unit steps (each above MINIMUM_SABER_DIRECTION_TRAVEL =
+// 0.05) tilted to the right of the authored `up` axis by the given angle,
+// passing through the cell center:
+//   inclusive: step direction (sin 45°, cos 45°) -> (0.5366,0.6179) (0.625,0.5) (0.7134,0.3821)
+//   exclusive: step direction (sin 48°, cos 48°) -> (0.5321,0.6115) (0.625,0.5) (0.7179,0.3885)
+// (both sweeps stay inside the 1x1 cell on the judged frame, so the only term
+// that changes between the two runs is the direction check).
 
 // (2a) exactly-45° sweep — inclusive, hits.
 {
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "boundary-inclusive" });
   readyGameplay(coordinator, flowEvent("boundary-inclusive", 0), flowColliderSettings);
-  judgeFrame(coordinator, FRAME1, 4920, 3120, 1);
-  judgeFrame(coordinator, { x: 0.537, y: 0.618 }, 5000, 3200, 2);
-  assert.deepEqual(judgeFrame(coordinator, { x: 0.713, y: 0.382 }, 5080, 3280, 3), [["hit", []]], "a sweep exactly at the 45° tolerance boundary is inclusive and hits");
+  judgeFrame(coordinator, { x: 0.5366, y: 0.6179 }, 4840, 4840, 1);
+  judgeFrame(coordinator, { x: 0.625, y: 0.5 }, 4920, 4920, 2);
+  assert.deepEqual(judgeFrame(coordinator, { x: 0.7134, y: 0.3821 }, 5000, 5000, 3), [["hit", []]], "a sweep exactly at the 45° tolerance boundary is inclusive and hits");
   coordinator.destroy();
 }
 
@@ -333,10 +369,11 @@ for (const [name, direction, mid, end] of EIGHT_WAYS) {
 {
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "boundary-exclusive" });
   readyGameplay(coordinator, flowEvent("boundary-exclusive", 0), flowColliderSettings);
-  judgeFrame(coordinator, FRAME1, 4920, 3120, 1);
-  judgeFrame(coordinator, { x: 0.532, y: 0.612 }, 5000, 3200, 2);
-  assert.deepEqual(judgeFrame(coordinator, { x: 0.718, y: 0.388 }, 5080, 3280, 3), [], "a sweep just beyond 45° produces no hit in-window");
-  assert.deepEqual(judgeFrame(coordinator, { x: 0.718, y: 0.388 }, 5300, 3480, 4), [["miss", ["wrong_direction"]]], "a sweep just beyond the 45° tolerance finalizes as a wrong_direction miss");
+  judgeFrame(coordinator, { x: 0.5321, y: 0.6115 }, 4840, 4840, 1);
+  judgeFrame(coordinator, { x: 0.625, y: 0.5 }, 4920, 4920, 2);
+  assert.deepEqual(judgeFrame(coordinator, { x: 0.7179, y: 0.3885 }, 5000, 5000, 3), [], "a sweep just beyond 45° produces no hit in-window");
+  judgeFrame(coordinator, { x: 0.7179, y: 0.3885 }, 5080, 5080, 4);
+  assert.deepEqual(judgeFrame(coordinator, { x: 0.7179, y: 0.3885 }, 5300, 5300, 5), [["miss", ["wrong_direction"]]], "a sweep just beyond the 45° tolerance finalizes as a wrong_direction miss");
   coordinator.destroy();
 }
 
@@ -344,46 +381,47 @@ for (const [name, direction, mid, end] of EIGHT_WAYS) {
 // The same out-of-tolerance rightward sweep against an authored `up` cue now
 // HITS because the direction gate is only applied when
 // `enforceAuthoredDirection === true && event.direction !== undefined`
-// (session-coordinator.js:779) — overlap-only scoring.
+// (session-coordinator.js:1053) — direction-agnostic scoring.
 {
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "direction-off" });
   readyGameplay(coordinator, flowEvent("direction-off", 0), flowColliderSettingsDirectionOff);
-  judgeFrame(coordinator, FRAME1, 4920, 3120, 1);
-  judgeFrame(coordinator, { x: 0.5, y: 0.5 }, 5000, 3200, 2);
-  assert.deepEqual(judgeFrame(coordinator, { x: 0.75, y: 0.5 }, 5080, 3280, 3), [["hit", []]], "with the toggle off, an out-of-tolerance crossing still hits (overlap-only)");
+  judgeFrame(coordinator, { x: 0.625, y: 0.5 }, 4840, 4840, 1);
+  judgeFrame(coordinator, { x: 0.7, y: 0.5 }, 4920, 4920, 2);
+  assert.deepEqual(judgeFrame(coordinator, { x: 0.775, y: 0.5 }, 5000, 5000, 3), [["hit", []]], "with the toggle off, an out-of-tolerance crossing still hits (direction gate skipped)");
   coordinator.destroy();
 }
 
 // ── (4) directionless cues accept any direction ─────────────────────────────
 // A cue with no `direction` property is a directionless note: the same gate
-// at session-coordinator.js:779 skips the authored-direction check entirely,
+// at session-coordinator.js:1053 skips the authored-direction check entirely,
 // so a plain in-window crossing hits regardless of movement direction.
 // (The directionless marker `9` is the Flow source conversion's
 // `requireFlowSourceDirection` sentinel
 // (session-coordinator.js:1361-1365) and has no resolved-content-event form
 // for this path; `direction: undefined` is the canonical directionless cue.)
-// A vertical (upward) sweep (dx = 0) — 90° off any authored horizontal
-// direction — still hits the directionless cue with the toggle ON.
+// A rightward sweep — 90° off the authored up/down axes — still hits the
+// directionless cue with the toggle ON.
 {
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "directionless" });
   readyGameplay(coordinator, flowEvent("directionless", undefined), flowColliderSettings);
-  judgeFrame(coordinator, FRAME1, 4920, 3120, 1);
-  judgeFrame(coordinator, { x: 0.625, y: 0.667 }, 5000, 3200, 2);
-  assert.deepEqual(judgeFrame(coordinator, { x: 0.625, y: 0.333 }, 5080, 3280, 3), [["hit", []]], "a directionless cue hits regardless of movement direction with the toggle on");
+  judgeFrame(coordinator, { x: 0.625, y: 0.5 }, 4840, 4840, 1);
+  judgeFrame(coordinator, { x: 0.7, y: 0.5 }, 4920, 4920, 2);
+  assert.deepEqual(judgeFrame(coordinator, { x: 0.775, y: 0.5 }, 5000, 5000, 3), [["hit", []]], "a directionless cue hits regardless of movement direction with the toggle on");
   coordinator.destroy();
 }
 
 // ── (5) mode-isolation sanity — the fixture IS a flow_colliders_v1 session ──
 // Pin the v1 collider setup the coordinator actually bound, surfaced through
 // the score partition's `flowColliderSettingsIdentity`
-// (session-coordinator.js:1068-1070) plus the hit attribution. This is the
-// setup the old script omitted, which is why it produced zero hits.
+// (session-coordinator.js:1068-1070) plus the hit attribution.
+// Authored `right` cue (direction 3) met by a rightward sweep — the same
+// geometry as the clean `right` case — so the hit lands at frame 3.
 {
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "mode-isolation" });
   readyGameplay(coordinator, flowEvent("mode-isolation", 3), flowColliderSettings);
-  judgeFrame(coordinator, FRAME1, 4920, 3120, 1);
-  judgeFrame(coordinator, { x: 0.5, y: 0.5 }, 5000, 3200, 2);
-  judgeFrame(coordinator, { x: 0.75, y: 0.5 }, 5080, 3280, 3);
+  judgeFrame(coordinator, { x: 0.5, y: 0.5 }, 4760, 4760, 1);
+  judgeFrame(coordinator, { x: 0.5875, y: 0.5 }, 4840, 4840, 2);
+  judgeFrame(coordinator, { x: 0.6625, y: 0.5 }, 4920, 4920, 3);
   const partitions = coordinator.getScorePartitions();
   assert.equal(partitions.length, 1, "exactly one score partition exists for the run");
   const partition = partitions[0];
@@ -395,4 +433,4 @@ for (const [name, direction, mid, end] of EIGHT_WAYS) {
   coordinator.destroy();
 }
 
-console.log("Validated eight-way Flow direction against Flow Colliders swept-segment scoring.");
+console.log("Validated eight-way Flow direction against Flow Colliders saber-capsule scoring.");
