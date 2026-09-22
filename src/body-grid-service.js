@@ -619,7 +619,20 @@ export function createAeroBodyGridService(options = {}) {
       return;
     }
     calibrationSequence += 1;
+    const priorCalibrationId = calibrationId;
     calibrationId = `${instanceId}-${calibrationSequence}`;
+    // A committed recalibration replaces the evidence stream: any latestEvidence
+    // still published belongs to the PREVIOUS calibration generation (a loss or
+    // source change keeps the last measured frame alive until it is explicitly
+    // cleared). Keeping it would hand the coordinator a snapshot whose evidence
+    // identity contradicts its own calibration, and the coordinator's contract
+    // rejection then freezes the whole session. Drop the stale frame; the very
+    // next scored standing frame re-adopts the new geometry through
+    // mapMeasuredAnchors (bounds are live by that point).
+    if (priorCalibrationId !== null && latestEvidence !== null) {
+      latestEvidence = null;
+      resetStraightStates();
+    }
     bounds = nextGeometry.bounds;
     baselineNose = nextGeometry.nose;
     invalidationReason = null;

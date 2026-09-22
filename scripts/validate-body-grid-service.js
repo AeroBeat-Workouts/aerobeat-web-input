@@ -372,6 +372,50 @@ assert.equal(snapshot.latestEvidence.provenance, "measured", "measured evidence 
 assert.equal(snapshot.latestEvidence.measurementTimestampMs, 8250);
 assert.ok(snapshot.latestEvidence.frozenTickId === undefined, "measured frames carry no frozen-tick identity");
 
+// D1 recovery seam (mobile-menu + shell-matrix reds): after an UNCALIBRATED-path
+// tracking loss (the service had been invalidated to fresh-required), a committed
+// recalibration must NOT keep publishing the PREVIOUS generation's measured frame.
+// The coordinator's public contract rejects cross-generation evidence; with the
+// per-frame throw swallowed at the assembly seam that rejection froze the session
+// clock in paused_tracking forever. A committed recalibration therefore drops the
+// stale frame — its own held-frame bookkeeping — so the snapshot's evidence can
+// never contradict its calibration.
+{
+  const recService = createAeroBodyGridService({ calibrationIdPrefix: "recal" });
+  // Initial T-pose → test-1, then released to calibrated/countdown with live evidence.
+  calibrate(recService, 0);
+  for (let at = 2500; at <= 6250; at += 250) recService.processPoseSample(pose(at, releasedChanges));
+  let rec = recService.getSnapshot();
+  assert.equal(rec.calibration.calibrationId, "recal-1");
+  assert.ok(rec.latestEvidence && rec.latestEvidence.calibrationId === "recal-1");
+  // Sustained loss while CALIBRATED enters the anchor freeze (same id, fresh=false).
+  for (const at of [7000, 7250, 7500, 7750]) recService.processPoseSample(pose(at, { right_wrist: { x: 0.46, y: 0.58, confidence: 0.2 } }));
+  rec = recService.getSnapshot();
+  assert.equal(rec.tracking.anchorsFrozen, true, "calibrated loss freezes the anchors");
+  assert.equal(rec.tracking.freshCalibrationRequired, false);
+  assert.equal(rec.latestEvidence.calibrationId, "recal-1", "frozen evidence stays on the old generation");
+  // Reset (source/menu path) invalidates: fresh-required and the stale frame is
+  // cleared by the invalidation itself. The production hazard was a STALE FRAME
+  // SURVIVING INTO THE NEW GENERATION (held across the reset while the recalibration
+  // committed) — that window no longer exists because reset clears it, AND the
+  // commit below additionally drops any frame that somehow persists. Either way the
+  // new generation must never publish old-generation evidence.
+  recService.resetCalibration("manual_reset");
+  rec = recService.getSnapshot();
+  assert.equal(rec.tracking.freshCalibrationRequired, true);
+  assert.equal(rec.latestEvidence, null, "reset clears the previous generation's published frame");
+  for (const offset of [0, 250, 500, 750, 1000, 1250, 1500, 1750, 2000, 2250]) recService.processPoseSample(pose(8000 + offset));
+  rec = recService.getSnapshot();
+  assert.equal(rec.calibration.calibrationId, "recal-2", "the mid-run recalibration commits a new generation");
+  assert.equal(rec.tracking.freshCalibrationRequired, false);
+  assert.equal(rec.tracking.gameplayPaused, false);
+  assert.equal(rec.calibration.readiness, "countdown");
+  assert.ok(!rec.latestEvidence || rec.latestEvidence.calibrationId === "recal-2", "the committed snapshot carries no old-generation evidence");
+  // The first scored standing frame re-publishes fresh evidence on the NEW id.
+  rec = recService.processPoseSample(pose(10500, releasedChanges));
+  assert.equal(rec.latestEvidence?.calibrationId ?? null, "recal-2", "post-recalibration scoring adopts the new generation");
+}
+
 // (e) Anti-flicker: a single bad sample never (re-)enters the freeze, and the
 // freeze only latches after 3 consecutive fails spanning 750ms. The freeze is
 // cleared by the very next passing sample.
