@@ -148,6 +148,13 @@ export function createAeroBodyGridService(options = {}) {
   let holdStartedAt = /** @type {number | null} */ (null);
   let cooldownUntil = 0;
   let releaseObserved = true;
+  // Set by a commit that satisfied the fresh-calibration requirement (a recovery
+  // recalibration or the initial T-pose). It tells the cooldown/release gates that
+  // the player's release from the holding pose is already implied — the commit can
+  // only complete while the pose IS held — so the post-commit gate must not re-arm
+  // on frames of the same held pose. A plain held-pose RE-FIRE during the cooldown
+  // does NOT set it: there the release observation remains genuinely outstanding.
+  let recoveryReleaseSatisfied = false;
   let calibrationSequence = 0;
   let calibrationId = /** @type {string | null} */ (null);
   let bounds = /** @type {AeroCalibratedBounds | null} */ (null);
@@ -563,7 +570,20 @@ export function createAeroBodyGridService(options = {}) {
     }
     if (calibrationId !== null && timestampMs < cooldownUntil) {
       calibrationState = "cooldown";
-      readiness = trackingPaused ? "paused_tracking" : "countdown";
+      // The current window's own commit decides its readiness:
+      //   • recovery/initial commit (fresh was required): the player IS in the
+      //     holding pose at commit time, so the release is implied and readiness
+      //     becomes countdown immediately — otherwise the fresh generation can
+      //     never reach countdown and the session cannot resume gameplay (the
+      //     input side of the D1 recovery seam reds);
+      //   • held-pose RE-FIRE commit (fresh already cleared): the release is NOT
+      //     yet observed for the new window, so readiness stays
+      //     calibration_required until a real standing frame is seen — the
+      //     player must physically release the T-pose.
+      // In both cases the gate below must not re-pin readiness: it fires on the
+      // SAME still-held frames the commit completed on, and releaseObserved here
+      // reflects what was observed BEFORE this window's hold.
+      readiness = (trackingPaused ? "paused_tracking" : (freshCalibrationRequired ? "calibration_required" : "countdown"));
       return;
     }
     if (calibrationId !== null && !releaseObserved) {
@@ -618,6 +638,21 @@ export function createAeroBodyGridService(options = {}) {
       invalidationReason = "invalid_calibration_geometry";
       return;
     }
+    // The cooldown/release gate distinguishes two commits:
+    //   • RECOVERY/initial — freshCalibrationRequired is true at commit time:
+    //     the service was in a recalibrating/holding state, so the holding pose
+    //     IS currently being held and the player's release from it is implied by
+    //     the commit itself (the next scored standing frame follows). The gate
+    //     must not re-arm on frames of the same held pose — readiness has to be
+    //     countdown immediately, or the fresh generation can never resume (the
+    //     input side of the D1 recovery seam reds).
+    //   • HELD-POSE RE-FIRE — fresh already false: a second T-pose hold completed
+    //     inside the previous generation's cooldown window. There the release
+    //     observation genuinely remains outstanding (releaseObserved stays as-is),
+    //     readiness stays calibration_required through the new cooldown, and the
+    //     player must physically release before the refired generation counts.
+    if (freshCalibrationRequired) recoveryReleaseSatisfied = true;
+    else recoveryReleaseSatisfied = false;
     calibrationSequence += 1;
     const priorCalibrationId = calibrationId;
     calibrationId = `${instanceId}-${calibrationSequence}`;
