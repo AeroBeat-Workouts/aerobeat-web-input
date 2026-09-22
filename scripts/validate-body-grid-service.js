@@ -409,8 +409,13 @@ assert.ok(snapshot.latestEvidence.frozenTickId === undefined, "measured frames c
   assert.equal(rec.calibration.calibrationId, "recal-2", "the mid-run recalibration commits a new generation");
   assert.equal(rec.tracking.freshCalibrationRequired, false);
   assert.equal(rec.tracking.gameplayPaused, false);
-  assert.equal(rec.calibration.readiness, "countdown");
+  assert.equal(rec.calibration.readiness, "countdown", "a fresh-required recovery commit reaches countdown immediately");
+  assert.equal(rec.calibration.releaseRequired, true, "the recovery snapshot still reports the physically held pose");
   assert.ok(!rec.latestEvidence || rec.latestEvidence.calibrationId === "recal-2", "the committed snapshot carries no old-generation evidence");
+  rec = recService.processPoseSample(pose(10400));
+  assert.equal(rec.calibration.readiness, "countdown", "continued held frames do not re-arm a fresh recovery commit");
+  assert.equal(rec.calibration.releaseRequired, true);
+  assert.ok(!rec.latestEvidence || rec.latestEvidence.calibrationId === "recal-2", "continued held frames cannot restore cross-generation evidence");
   // The first scored standing frame re-publishes fresh evidence on the NEW id.
   rec = recService.processPoseSample(pose(10500, releasedChanges));
   assert.equal(rec.latestEvidence?.calibrationId ?? null, "recal-2", "post-recalibration scoring adopts the new generation");
@@ -515,7 +520,7 @@ snapshot = calibrate(service, 14500);
 assert.equal(snapshot.calibration.calibrationId, "test-2");
 assert.equal(snapshot.tracking.gameplayPaused, false);
 assert.equal(snapshot.tracking.freshCalibrationRequired, false);
-assert.equal(snapshot.calibration.readiness, "countdown");
+assert.equal(snapshot.calibration.readiness, "calibration_required", "an ordinary full T-pose refire waits for physical release");
 
 // Source, mirror, and source-aspect identity changes each invalidate scoring without applying a second x flip.
 snapshot = service.processPoseSample(pose(17000), { sourceAspectRatio: 4 / 3, sourceChangeId: "camera-b" });
@@ -687,7 +692,15 @@ assert.equal(refire.getSnapshot().calibration.releaseRequired, false);
 for (let at = 6500; at <= 10500; at += 250) {
   refire.processPoseSample(pose(at));
 }
-assert.equal(refire.getSnapshot().calibration.calibrationId, "refire-2", "release plus a fresh exact hold refires");
+snapshot = refire.getSnapshot();
+assert.equal(snapshot.calibration.calibrationId, "refire-2", "release plus a fresh exact hold refires");
+assert.equal(snapshot.calibration.readiness, "calibration_required", "an ordinary held-pose refire is not ready before a real release");
+assert.equal(snapshot.calibration.releaseRequired, true, "an ordinary held-pose refire keeps release outstanding");
+assert.ok(!snapshot.latestEvidence || snapshot.latestEvidence.calibrationId === "refire-2", "an ordinary refire clears evidence from the previous generation");
+snapshot = refire.processPoseSample(pose(10750, releasedChanges));
+assert.equal(snapshot.calibration.readiness, "countdown", "a real non-T-pose frame releases the ordinary refire");
+assert.equal(snapshot.calibration.releaseRequired, false);
+assert.equal(snapshot.latestEvidence?.calibrationId ?? null, "refire-2", "post-release evidence belongs to the refired generation");
 
 // Every required anchor independently gates calibration at the exact confidence boundary.
 for (const name of names) {

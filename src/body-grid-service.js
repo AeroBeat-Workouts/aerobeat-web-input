@@ -150,10 +150,9 @@ export function createAeroBodyGridService(options = {}) {
   let releaseObserved = true;
   // Set by a commit that satisfied the fresh-calibration requirement (a recovery
   // recalibration or the initial T-pose). It tells the cooldown/release gates that
-  // the player's release from the holding pose is already implied — the commit can
-  // only complete while the pose IS held — so the post-commit gate must not re-arm
-  // on frames of the same held pose. A plain held-pose RE-FIRE during the cooldown
-  // does NOT set it: there the release observation remains genuinely outstanding.
+  // countdown readiness is allowed while that commit's T-pose is still physically
+  // held. A plain held-pose RE-FIRE does NOT set it: that generation must stay
+  // calibration-required until a real non-T-pose frame observes release.
   let recoveryReleaseSatisfied = false;
   let calibrationSequence = 0;
   let calibrationId = /** @type {string | null} */ (null);
@@ -298,6 +297,7 @@ export function createAeroBodyGridService(options = {}) {
     holdStartedAt = null;
     holdFrames = [];
     releaseObserved = true;
+    recoveryReleaseSatisfied = false;
     cooldownUntil = 0;
     // Partial auto-recovery is only for tracking losses: the player was lost
     // mid-song and the same calibration bounds are still valid. Source changes,
@@ -567,6 +567,7 @@ export function createAeroBodyGridService(options = {}) {
     const qualified = allRequiredAnchorsVisible && qualifiesTPose(landmarks);
     if (calibrationId !== null && !releaseObserved && !qualified) {
       releaseObserved = true;
+      recoveryReleaseSatisfied = false;
     }
     if (calibrationId !== null && timestampMs < cooldownUntil) {
       calibrationState = "cooldown";
@@ -580,15 +581,18 @@ export function createAeroBodyGridService(options = {}) {
       //     yet observed for the new window, so readiness stays
       //     calibration_required until a real standing frame is seen — the
       //     player must physically release the T-pose.
-      // In both cases the gate below must not re-pin readiness: it fires on the
-      // SAME still-held frames the commit completed on, and releaseObserved here
-      // reflects what was observed BEFORE this window's hold.
-      readiness = (trackingPaused ? "paused_tracking" : (freshCalibrationRequired ? "calibration_required" : "countdown"));
+      // In both cases the persisted commit context, not freshCalibrationRequired
+      // (which the commit clears), decides whether held frames may report countdown.
+      readiness = trackingPaused
+        ? "paused_tracking"
+        : (releaseObserved || recoveryReleaseSatisfied ? "countdown" : "calibration_required");
       return;
     }
     if (calibrationId !== null && !releaseObserved) {
       calibrationState = "cooldown";
-      readiness = trackingPaused ? "paused_tracking" : "countdown";
+      readiness = trackingPaused
+        ? "paused_tracking"
+        : (recoveryReleaseSatisfied ? "countdown" : "calibration_required");
       return;
     }
     if (calibrationId !== null && !freshCalibrationRequired && !qualified) {
@@ -648,11 +652,10 @@ export function createAeroBodyGridService(options = {}) {
     //     input side of the D1 recovery seam reds).
     //   • HELD-POSE RE-FIRE — fresh already false: a second T-pose hold completed
     //     inside the previous generation's cooldown window. There the release
-    //     observation genuinely remains outstanding (releaseObserved stays as-is),
-    //     readiness stays calibration_required through the new cooldown, and the
-    //     player must physically release before the refired generation counts.
-    if (freshCalibrationRequired) recoveryReleaseSatisfied = true;
-    else recoveryReleaseSatisfied = false;
+    //     observation genuinely remains outstanding, readiness stays
+    //     calibration_required through the new cooldown, and the player must
+    //     physically release before the refired generation counts.
+    recoveryReleaseSatisfied = freshCalibrationRequired;
     calibrationSequence += 1;
     const priorCalibrationId = calibrationId;
     calibrationId = `${instanceId}-${calibrationSequence}`;
@@ -674,7 +677,7 @@ export function createAeroBodyGridService(options = {}) {
     freshCalibrationRequired = false;
     trackingPaused = false;
     calibrationState = "cooldown";
-    readiness = "countdown";
+    readiness = recoveryReleaseSatisfied ? "countdown" : "calibration_required";
     releaseObserved = false;
     cooldownUntil = sample.measurementTimestampMs + calibrationDefaults.cooldownDurationMs;
     holdStartedAt = null;
