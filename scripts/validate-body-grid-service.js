@@ -512,6 +512,36 @@ assert.equal(snapshot.tracking.anchorsFrozen, false, "going off-grid never enter
 assert.equal(snapshot.calibration.state, "calibrated", "going off-grid leaves the calibration state untouched");
 assert.equal(offGridWrist.anchor, "left_wrist");
 
+// A bilateral, confident, horizontally extended off-grid pose can resemble a
+// T-pose, but in an ordinary healthy calibrated session it is still motion
+// outside the active authority bounds—not permission to replace those bounds.
+const bilateralOffGrid = createAeroBodyGridService({ calibrationIdPrefix: "bilateral-off-grid" });
+calibrate(bilateralOffGrid, 0);
+for (let at = 2500; at <= 6250; at += 250) {
+  bilateralOffGrid.processPoseSample(pose(at, releasedChanges));
+}
+const bilateralBounds = bilateralOffGrid.getSnapshot().calibration.bounds;
+assert.ok(bilateralBounds);
+for (let at = 6500; at <= 8750; at += 250) {
+  snapshot = bilateralOffGrid.processPoseSample(pose(at, {
+    left_wrist: { x: 1.0, y: 0.4 },
+    right_wrist: { x: 0.0, y: 0.4 }
+  }));
+  assert.equal(snapshot.calibration.calibrationId, "bilateral-off-grid-1", "bilateral off-grid motion never replaces healthy calibration");
+  assert.deepEqual(snapshot.calibration.bounds, bilateralBounds, "bilateral off-grid motion preserves the active bounds");
+  assert.equal(snapshot.calibration.state, "calibrated", "bilateral off-grid motion never starts a recalibration hold");
+  assert.equal(snapshot.calibration.readiness, "countdown", "bilateral off-grid motion keeps countdown participation ready");
+  assert.equal(snapshot.tracking.gameplayPaused, false, "bilateral off-grid motion never pauses gameplay");
+  assert.equal(snapshot.tracking.freshCalibrationRequired, false, "bilateral off-grid motion never requires fresh calibration");
+  for (const wristName of ["left_wrist", "right_wrist"]) {
+    const wrist = snapshot.anchors.find((anchor) => anchor.anchor === wristName);
+    assert.ok(wrist, `${wristName} remains staged while off-grid`);
+    assert.ok(Number.isFinite(wrist.x) && Number.isFinite(wrist.y), `${wristName} keeps finite off-grid coordinates`);
+    assert.equal(wrist.cell, null, `${wristName} has no scoring cell while off-grid`);
+    assert.equal(wrist.subcell, null, `${wristName} has no scoring subcell while off-grid`);
+  }
+}
+
 // Full T-pose calibration remains available and is the invalidation path for source changes.
 for (let at = 14000; at <= 14250; at += 250) {
   service.processPoseSample(pose(at, releasedChanges));
@@ -560,6 +590,27 @@ for (let at = 6600; at <= 7200; at += 250) {
 }
 assert.equal(sourceNoRecovery.getSnapshot().tracking.freshCalibrationRequired, true, "source change requires full T-pose, not partial recovery");
 assert.equal(sourceNoRecovery.getSnapshot().tracking.recoveryInProgress, false, "no recovery hold after a source change");
+
+// A source-invalidated recovery must be free to replace the retained bounds,
+// even when both wrists lie outside those old bounds.
+const sourceReplacement = createAeroBodyGridService({ calibrationIdPrefix: "source-replacement" });
+calibrate(sourceReplacement, 0);
+for (let at = 2500; at <= 6250; at += 250) {
+  sourceReplacement.processPoseSample(pose(at, releasedChanges));
+}
+const retainedSourceBounds = sourceReplacement.getSnapshot().calibration.bounds;
+assert.ok(retainedSourceBounds);
+for (let at = 6500; at <= 8500; at += 250) {
+  snapshot = sourceReplacement.processPoseSample(pose(at, {
+    left_wrist: { x: 1.0, y: 0.4 },
+    right_wrist: { x: 0.0, y: 0.4 }
+  }, { sourceId: "camera-b" }));
+}
+assert.equal(snapshot.calibration.calibrationId, "source-replacement-2", "source-change recovery accepts replacement bounds");
+assert.notDeepEqual(snapshot.calibration.bounds, retainedSourceBounds, "source-change recovery replaces the old bounds");
+assert.equal(snapshot.tracking.freshCalibrationRequired, false);
+assert.equal(snapshot.tracking.gameplayPaused, false);
+assert.equal(snapshot.calibration.readiness, "countdown", "source-change recovery resumes countdown immediately");
 
 // (a) Five scattered bad frames within 1s: consecutive fails never reach the
 // three-sample latch, so no pause can occur.

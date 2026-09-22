@@ -564,7 +564,10 @@ export function createAeroBodyGridService(options = {}) {
 
   /** @param {AeroPoseRoutingSample} sample @param {Map<string, NormalizedPoseLandmark>} landmarks */
   function updateCalibration(sample, landmarks) {
-    const qualified = allRequiredAnchorsVisible && qualifiesTPose(landmarks);
+    const ordinaryHealthyRefire = calibrationId !== null && bounds !== null && !freshCalibrationRequired && !trackingPaused;
+    const qualified = allRequiredAnchorsVisible &&
+      qualifiesTPose(landmarks) &&
+      (!ordinaryHealthyRefire || wristsInsideCalibratedBounds(landmarks, bounds));
     if (calibrationId !== null && !releaseObserved && !qualified) {
       releaseObserved = true;
       recoveryReleaseSatisfied = false;
@@ -1235,6 +1238,23 @@ function qualifiesTPose(landmarks) {
   return aligned &&
     angleDegrees(leftShoulder, leftElbow, leftWrist) >= calibrationDefaults.minimumElbowAngleDeg &&
     angleDegrees(rightShoulder, rightElbow, rightWrist) >= calibrationDefaults.minimumElbowAngleDeg;
+}
+
+/** @param {Map<string, NormalizedPoseLandmark>} landmarks @param {AeroCalibratedBounds | null} activeBounds */
+function wristsInsideCalibratedBounds(landmarks, activeBounds) {
+  if (activeBounds === null) {
+    return false;
+  }
+  return ["left_wrist", "right_wrist"].every((name) => {
+    const wrist = landmarks.get(name);
+    if (!wrist) {
+      return false;
+    }
+    const raw = normalizeAgainstBounds(cameraPreviewToAthlete(wrist), activeBounds);
+    return Number.isFinite(raw.x) && Number.isFinite(raw.y) &&
+      raw.x >= -Number.EPSILON && raw.x <= 1 + Number.EPSILON &&
+      raw.y >= -Number.EPSILON && raw.y <= 1 + Number.EPSILON;
+  });
 }
 
 /** @param {readonly NormalizedPoseLandmark[][]} frames */
