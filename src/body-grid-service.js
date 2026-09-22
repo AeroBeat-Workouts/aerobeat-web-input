@@ -256,6 +256,11 @@ export function createAeroBodyGridService(options = {}) {
 
   /** @returns {AeroBodyGridServiceSnapshot} */
   function publish() {
+    // [dbg4] TEMPORARY — REVERT BEFORE COMMIT
+    if (typeof globalThis !== "undefined" && globalThis.__aeroDbgInput) {
+      const snap = buildSnapshot();
+      try { console.log("[dbg4]", JSON.stringify({ svc: true, ev: snap.latestEvidence ? `${snap.latestEvidence.calibrationId}@${Math.round(snap.latestEvidence.measurementTimestampMs)}` : null, cal: snap.calibration.calibrationId, st: snap.calibration.state, rd: snap.calibration.readiness, fr: snap.tracking.freshCalibrationRequired, ps: snap.tracking.gameplayPaused, ts: Math.round(snap.timestampMs) })); } catch { /* dbg */ }
+    }
     latestSnapshot = buildSnapshot();
     for (const listener of [...listeners]) {
       notifyListener(listener, latestSnapshot);
