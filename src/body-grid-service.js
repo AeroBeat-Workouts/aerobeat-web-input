@@ -188,6 +188,13 @@ export function createAeroBodyGridService(options = {}) {
   let allRequiredAnchorsVisible = false;
   let trackingPaused = false;
   let freshCalibrationRequired = true;
+  // Mid-game T-pose recalibration gesture gate. The assembly disables this while
+  // the session is in active gameplay (playing/countdown) so a T-pose held during
+  // a move never commits a new calibration generation (which would mint a fresh
+  // calibrationId, force the coordinator to pause, and run the resume countdown).
+  // Initial calibration (bounds null) and pause-screen / recovery recalibration
+  // (freshCalibrationRequired or trackingPaused) are unaffected by this gate.
+  let midGameRecalibrationEnabled = true;
   let latestEvidence = /** @type {AeroGameplayEvidenceSnapshot | null} */ (null);
   /** @type {AeroBodyGridAnchorSnapshot[]} */
   let latestAnchors = [];
@@ -565,7 +572,13 @@ export function createAeroBodyGridService(options = {}) {
   /** @param {AeroPoseRoutingSample} sample @param {Map<string, NormalizedPoseLandmark>} landmarks */
   function updateCalibration(sample, landmarks) {
     const ordinaryHealthyRefire = calibrationId !== null && bounds !== null && !freshCalibrationRequired && !trackingPaused;
-    const qualified = allRequiredAnchorsVisible &&
+    // A mid-game T-pose recalibration gesture is suppressed while the session is
+    // in active gameplay (the assembly disables midGameRecalibrationEnabled).
+    // Only the initial calibration and pause-screen / recovery recalibration
+    // remain active, so a T-pose held during a move no longer commits a new
+    // calibration generation that would pause the game.
+    const midGameGestureBlocked = ordinaryHealthyRefire && !midGameRecalibrationEnabled;
+    const qualified = !midGameGestureBlocked && allRequiredAnchorsVisible &&
       qualifiesTPose(landmarks) &&
       (!ordinaryHealthyRefire || wristsInsideCalibratedBounds(landmarks, bounds));
     if (calibrationId !== null && !releaseObserved && !qualified) {
@@ -1094,6 +1107,10 @@ export function createAeroBodyGridService(options = {}) {
     processPoseSample,
     advanceTime,
     resetCalibration,
+    setMidGameRecalibrationEnabled(enabled) {
+      if (destroyed) return;
+      midGameRecalibrationEnabled = enabled === true;
+    },
     getFreshEvidence,
     getEvidenceHistory() {
       return Object.freeze([...evidenceHistory]);

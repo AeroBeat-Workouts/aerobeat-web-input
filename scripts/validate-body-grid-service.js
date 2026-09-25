@@ -421,6 +421,57 @@ assert.ok(snapshot.latestEvidence.frozenTickId === undefined, "measured frames c
   assert.equal(rec.latestEvidence?.calibrationId ?? null, "recal-2", "post-recalibration scoring adopts the new generation");
 }
 
+// 0.0.72: mid-game T-pose recalibration gesture gate. While the session is in
+// active gameplay (the assembly disables midGameRecalibrationEnabled), a T-pose
+// held during a move must NOT commit a new calibration generation (which would
+// mint a fresh calibrationId, force the coordinator to pause, and run the resume
+// countdown). Initial calibration and pause-screen / recovery recalibration
+// remain enabled, so the gate only suppresses the healthy mid-game refire.
+{
+  // (A) Default gate ON: a mid-game T-pose hold commits a new generation (backward-compat).
+  const gateOn = createAeroBodyGridService({ calibrationIdPrefix: "gate-on" });
+  calibrate(gateOn, 0);
+  for (let at = 2500; at <= 6250; at += 250) gateOn.processPoseSample(pose(at, releasedChanges));
+  let onSnap = gateOn.getSnapshot();
+  assert.equal(onSnap.calibration.calibrationId, "gate-on-1");
+  assert.equal(onSnap.calibration.state, "calibrated");
+  for (let at = 7000; at <= 11500; at += 250) gateOn.processPoseSample(pose(at));
+  onSnap = gateOn.getSnapshot();
+  assert.equal(onSnap.calibration.calibrationId, "gate-on-2", "gate ON: a mid-game T-pose hold commits a new generation");
+
+  // (B) Gate OFF: a mid-game T-pose hold does NOT commit; the service stays on the
+  // same generation, unpaused, with no fresh-calibration requirement.
+  const gateOff = createAeroBodyGridService({ calibrationIdPrefix: "gate-off" });
+  calibrate(gateOff, 0);
+  for (let at = 2500; at <= 6250; at += 250) gateOff.processPoseSample(pose(at, releasedChanges));
+  let offSnap = gateOff.getSnapshot();
+  assert.equal(offSnap.calibration.calibrationId, "gate-off-1");
+  assert.equal(offSnap.calibration.state, "calibrated");
+  gateOff.setMidGameRecalibrationEnabled(false);
+  for (let at = 7000; at <= 11500; at += 250) gateOff.processPoseSample(pose(at));
+  offSnap = gateOff.getSnapshot();
+  assert.equal(offSnap.calibration.calibrationId, "gate-off-1", "gate OFF: a mid-game T-pose hold does NOT commit a new generation");
+  assert.equal(offSnap.tracking.gameplayPaused, false, "gate OFF: no tracking pause from a mid-game T-pose");
+  assert.equal(offSnap.tracking.freshCalibrationRequired, false, "gate OFF: no fresh-calibration requirement from a mid-game T-pose");
+
+  // (C) Initial calibration still works with the gate off (bounds null path).
+  const gateFresh = createAeroBodyGridService({ calibrationIdPrefix: "gate-fresh" });
+  gateFresh.setMidGameRecalibrationEnabled(false);
+  const freshSnap = calibrate(gateFresh, 0);
+  assert.equal(freshSnap.calibration.calibrationId, "gate-fresh-1", "gate OFF: initial calibration still commits");
+  assert.equal(freshSnap.calibration.readiness, "countdown");
+
+  // (D) Recovery recalibration (after resetCalibration) still works with the gate
+  // off — the pause-screen / recovery path is unaffected by the gate.
+  gateOff.resetCalibration("menu_open");
+  let recOffSnap = gateOff.getSnapshot();
+  assert.equal(recOffSnap.tracking.freshCalibrationRequired, true, "gate OFF: reset arms a fresh-required recovery");
+  for (let offset = 0; offset <= 2250; offset += 250) gateOff.processPoseSample(pose(12000 + offset));
+  recOffSnap = gateOff.getSnapshot();
+  assert.equal(recOffSnap.calibration.calibrationId, "gate-off-2", "gate OFF: a recovery T-pose recalibration still commits");
+  assert.equal(recOffSnap.tracking.freshCalibrationRequired, false);
+}
+
 // (e) Anti-flicker: a single bad sample never (re-)enters the freeze, and the
 // freeze only latches after 3 consecutive fails spanning 750ms. The freeze is
 // cleared by the very next passing sample.
