@@ -786,11 +786,24 @@ export function createAeroBodyGridService(options = {}) {
     latestAnchors = anchors;
     latestEntries = entries;
     if (scoringValid) {
+      // A passing frame ends both the latched freeze and the provisional
+      // pre-latch hold; only the next loss window may reuse frozen tick IDs.
+      frozenTickId = 0;
       latestMeasuredNoseParallax = measuredNoseParallaxSample(sample, landmarks.get("nose"));
     }
     if (!scoringValid) {
-      latestEvidence = null;
       resetStraightStates();
+      if (!trackingPaused && !freshCalibrationRequired && heldEvidence !== null) {
+        // Low-confidence measured frames are not scoring measurements. Hold
+        // the last good anchors as provisional frozen evidence throughout the
+        // hysteresis window; the loss latch still controls anchorsFrozen and
+        // the uncalibrated/full-invalidation path remains unchanged.
+        latestAnchors = heldEvidence.anchors;
+        latestEntries = [];
+        publishFrozenEvidence();
+      } else {
+        latestEvidence = null;
+      }
       return;
     }
     const actions = detectBoxingActions(sample, landmarks, byName);
@@ -1032,6 +1045,15 @@ export function createAeroBodyGridService(options = {}) {
       // Frozen: tick the held-evidence publication (fresh per-tick identity)
       // and keep counting the loss window; the anchors themselves are never
       // touched by a no-frame tick.
+      publishFrozenEvidence();
+    } else if (bounds !== null && heldEvidence !== null && !trackingPaused && !freshCalibrationRequired &&
+        lastMeasuredAt !== null && nextTimestamp - lastMeasuredAt >= 100) {
+      // A no-frame gap precedes the 500ms loss latch. Do not let the old
+      // measured evidence expire while gameplay's audio clock keeps running:
+      // score provisionally on the last measured position until either a
+      // passing frame arrives or the ordinary hysteresis latches F4.
+      latestAnchors = heldEvidence.anchors;
+      latestEntries = [];
       publishFrozenEvidence();
     }
     return publish();
