@@ -4,11 +4,11 @@
 // `flow_colliders_v1` scoring path under the 0.0.61 L-F2 saber-capsule
 // detector. The swept 2.5D wrist-segment collision model this script was
 // originally written against is retired: `swept-segment` hit detection is
-// replaced by a per-frame saber-capsule test that reads the current wrist
-// sample and orients the beam from a 100 ms wrist-history direction oracle
-// (see `session-coordinator.js` `evaluateFlowColliderNotesAndBombs`,
-// ~:999-1069, and `flow-collider-collision.js` `saberDirectionFromWristHistory`,
-// `saberCapsuleContactsFlowTarget`, `matchesAuthoredDirection`).
+// replaced by a per-frame saber-capsule test: the resolved equipment pose
+// sets the beam geometry/orientation, while measured wrist motion separately
+// gates the authored direction (see `session-coordinator.js`
+// `evaluateFlowColliderNotesAndBombs` and `flow-collider-collision.js`
+// `resolvedSaberCapsuleContactsFlowTarget`, `matchesAuthoredDirection`).
 //
 // This script drives the session coordinator end to end with the current
 // capsule detector:
@@ -36,7 +36,10 @@
 //     `createFlowColliderSettings`, flow-collider-collision.js:35-46).
 //   * Every advance input carries `sourceIdentity` (a non-empty string).
 //     `measuredColliderSample` returns null without it
-//     (flow-collider-collision.js:84), so the whole collider path is skipped.
+//     (flow-collider-collision.js:105), so the whole collider path is skipped.
+//   * Active collider frames carry paired resolved Flow saber poses, each
+//     anchored exactly to its current measured wrist in judge space. Missing
+//     poses are rejected rather than falling back to synthesized geometry.
 //
 // Coordinate note: the collision math works in measured athlete-grid
 // coordinates lifted to the judge plane as `sx = 4*x - 0.5`,
@@ -51,19 +54,16 @@
 //
 // Frame-choreography pattern (saber-capsule era):
 //
-//   The capsule detector evaluates ONE frame at a time: the wrist sample
-//   `current` is checked against the 1×1 cell box with the saber axis
-//   `saberDirection = saberDirectionFromWristHistory(history, nowMs)` — a
-//   100 ms lookback over the prior wrist positions — and the authored
+//   The capsule detector evaluates ONE frame at a time: paired resolved
+//   equipment poses anchor each beam to the measured wrist, and their
+//   orientation determines contact geometry. This fixture's identity
+//   orientation tests direction gating under one fixed beam geometry, not
+//   orientation-aware equipment resolution. Separately, the authored
 //   direction gate uses `matchesAuthoredDirection(direction, prior, current,
-//   45°)`, where `prior` is the PREVIOUS measured sample. Because of this
-//   windowed oracle, the judged frame needs enough PRIOR samples in its
-//   100 ms window so the saber axis matches the authored direction. The
-//   four-frame clean-direction sweep (4760 → 4840 → 4920 → 5000 ms, 80 ms
-//   gaps) gives the judged frame (pos 4920) two samples inside the 100 ms
-//   window (4840 + 4920) so the saber axis resolves to the correct
-//   direction, AND gives `matchesAuthoredDirection` a valid `prior` from the
-//   immediately preceding frame. The first frame (4760) is a pure baseline
+//   45°)`, where `prior` is the PREVIOUS measured wrist sample. The four-frame
+//   clean-direction sweep (4760 → 4840 → 4920 → 5000 ms, 80 ms gaps) gives
+//   the judged frame (pos 4920) a valid prior from 4840 for that gate.
+//   The first frame (4760) is a pure baseline
 //   seed (it is skipped by the coordinator's `leftWristBaselineRequired`
 //   path, session-coordinator.js:1028). Frames stay inside the ±180 ms
 //   timing window [4820, 5180] around the event center 5000 ms.
@@ -83,6 +83,24 @@ const SOURCE_IDENTITY = "eight-way-camera";
 const ATHLETE_BASE = Object.freeze({ nose: { x: 0.5, y: 0.3 }, left_shoulder: { x: 0.6, y: 0.4 }, right_shoulder: { x: 0.4, y: 0.4 }, left_elbow: { x: 0.7, y: 0.4 }, right_elbow: { x: 0.3, y: 0.4 }, left_wrist: { x: 0.8, y: 0.4 }, right_wrist: { x: 0.2, y: 0.4 } });
 const ANCHOR_NAMES = Object.freeze(["nose", "left_shoulder", "right_shoulder", "left_elbow", "right_elbow", "left_wrist", "right_wrist"]);
 const CALIBRATION_ID = "cal-eight-way";
+const EQUIPMENT_CONFIG_IDENTITY = Object.freeze({ schema: "aerobeat/equipment_config_identity", version: 1, algorithm: "sha256", value: "b".repeat(64) });
+
+/** Pair the exact measured wrists with their resolved Flow saber poses. */
+function equipmentPosesForEvidence(evidence) {
+  return Object.freeze(["left_wrist", "right_wrist"].map((role) => {
+    const wrist = evidence.anchors.find((anchor) => anchor.anchor === role);
+    assert.ok(wrist, `measured ${role} is present`);
+    return Object.freeze({
+      role,
+      mode: "flow",
+      anchor: Object.freeze({ x: 4 * wrist.x - 0.5, y: 2.5 - 3 * wrist.y, z: 0 }),
+      scale: 1,
+      orientation: Object.freeze({ x: 0, y: 0, z: 0, w: 1 }),
+      geometryIdentity: "aerobeat/saber_capsule_v1",
+      configIdentity: EQUIPMENT_CONFIG_IDENTITY
+    });
+  }));
+}
 
 // Exact v1 Flow Collider settings record the coordinator requires
 // (flow-collider-collision.js:16-24, 26; normalized at
@@ -251,7 +269,8 @@ function judgeFrame(coordinator, leftWrist, positionMs, wallMs, frameIndex) {
       countdownFrozen: false,
       latestEvidence: evidence,
       straightQualifications: []
-    }
+    },
+    equipmentPoses: equipmentPosesForEvidence(evidence)
   });
   return Object.freeze(coordinator.getJudgements().map((entry) => Object.freeze([entry.result, Object.freeze([...entry.diagnostics])] /** @satisfies {readonly ["hit"|"miss"|"ignored", readonly string[]]} */ )));
 }
@@ -259,11 +278,10 @@ function judgeFrame(coordinator, leftWrist, positionMs, wallMs, frameIndex) {
 // ─────────────────────────────────────────────────────────────────────────────
 // The eight authored directions and their four-frame trajectories.
 //
-// Under the saber-capsule detector, the judged frame needs PRIOR wrist
-// positions inside the 100 ms direction-oracle window so the saber axis
-// matches the authored direction. Four frames (80 ms apart in both wall and
-// song time) give the judged frame two prior samples in-window and a valid
-// `prior` for `matchesAuthoredDirection`.
+// Under the saber-capsule detector, the resolved equipment pose orients
+// the contact beam; prior measured wrist positions are needed separately
+// for `matchesAuthoredDirection`. Four frames (80 ms apart in both wall and
+// song time) give the judged frame a valid measured `prior` sample.
 //
 // Frame 1 is a baseline seed at the start of the sweep (athlete coordinates
 // at -0.5·dir from the cell center (2,1) in judge space). Frames 2 and 3
@@ -306,6 +324,27 @@ const EIGHT_WAYS = Object.freeze([
 const FRAME_WALLS = Object.freeze([4760, 4840, 4920, 5000]);
 // Song timeline mirrors the wall timestamps (position == wall in this fixture).
 const FRAME_SONG = Object.freeze([4760, 4840, 4920, 5000]);
+
+// Active evaluation must reject absent poses even with otherwise valid measured
+// direction evidence; no silent fallback can replace the resolved geometry.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "missing-equipment-poses" });
+  readyGameplay(coordinator, flowEvent("missing-equipment-poses", 3), flowColliderSettings);
+  const evidence = evidenceSnapshot({ x: 0.5, y: 0.5 }, 4760, 1);
+  assert.throws(() => coordinator.advance({
+    timestampMs: 4760,
+    clock: { contextTimeSeconds: 4.76, positionSeconds: 4.76, playing: true },
+    input: {
+      sourceIdentity: SOURCE_IDENTITY,
+      calibration: { calibrationId: CALIBRATION_ID, readiness: "countdown" },
+      tracking: { gameplayPaused: false, freshCalibrationRequired: false },
+      countdownFrozen: false,
+      latestEvidence: evidence,
+      straightQualifications: []
+    }
+  }), { code: "equipment_poses_invalid", message: "Active collider evaluation requires exact equipment poses" });
+  coordinator.destroy();
+}
 
 // ── (1a) enforceAuthoredDirection: true — each authored direction hits ──────
 for (const [name, direction, frames] of EIGHT_WAYS) {
