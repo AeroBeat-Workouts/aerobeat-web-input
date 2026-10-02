@@ -413,6 +413,13 @@ export function createAeroBodyGridService(options = {}) {
     lossDurationMs = Math.max(calibrationDefaults.trackingLossPauseMs, lossDurationMs);
     if (bounds === null || heldEvidence === null) {
       trackingPaused = true;
+      // A reset/source change has already required a new T-pose. A subsequent
+      // camera gap must not relabel it as ordinary loss and arm partial recovery
+      // against the retained (but invalidated) calibration bounds.
+      if (freshCalibrationRequired && invalidationReason !== null && invalidationReason !== "tracking_lost") {
+        resetLossAndRecoveryClocks();
+        return;
+      }
       invalidateCalibration("tracking_lost");
       return;
     }

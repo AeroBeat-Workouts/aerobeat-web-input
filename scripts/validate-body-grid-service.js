@@ -727,6 +727,71 @@ assert.equal(snapshot.tracking.gameplayPaused, true);
 assert.equal(snapshot.calibration.invalidationReason, "badge_reset");
 assert.ok(snapshot.calibration.bounds);
 
+// An explicit/manual reset or actual source change retains old display
+// geometry, not permission to auto-recover from a camera restart gap.
+for (const reason of ["explicit_reset", "manual_reset", "source_changed"]) {
+  for (const gapPath of ["advanceTime", "measured_gap"]) {
+    const resetService = createAeroBodyGridService({ calibrationIdPrefix: `fresh-${reason}-${gapPath}` });
+    calibrate(resetService, 0);
+    for (let at = 2500; at <= 6250; at += 250) {
+      resetService.processPoseSample(pose(at, releasedChanges));
+    }
+    const previous = resetService.getSnapshot().calibration;
+    assert.ok(previous.bounds);
+    snapshot = reason === "source_changed"
+      ? resetService.processPoseSample(pose(6350, releasedChanges, { sourceId: "camera-b" }))
+      : resetService.resetCalibration(reason);
+    assert.equal(snapshot.calibration.invalidationReason, reason);
+    const sourceOptions = reason === "source_changed" ? { sourceId: "camera-b" } : {};
+    if (gapPath === "advanceTime") {
+      resetService.advanceTime(6600);
+      resetService.advanceTime(6800);
+      snapshot = resetService.advanceTime(7100);
+    } else {
+      snapshot = resetService.processPoseSample(pose(7100, releasedChanges, sourceOptions));
+    }
+    assert.equal(snapshot.calibration.invalidationReason, reason, `${reason}/${gapPath} retains reset intent`);
+    assert.equal(snapshot.tracking.freshCalibrationRequired, true);
+    assert.equal(snapshot.tracking.recoveryInProgress, false);
+    assert.equal(snapshot.calibration.calibrationId, previous.calibrationId);
+    assert.deepEqual(snapshot.calibration.bounds, previous.bounds);
+    for (let at = 7200; at <= 7800; at += 100) {
+      snapshot = resetService.processPoseSample(pose(at, releasedChanges, sourceOptions));
+    }
+    assert.equal(snapshot.tracking.freshCalibrationRequired, true, `${reason}/${gapPath} non-T-pose cannot recover`);
+    assert.equal(snapshot.tracking.recoveryInProgress, false);
+    assert.equal(snapshot.calibration.calibrationId, previous.calibrationId);
+    assert.notEqual(snapshot.calibration.readiness, "countdown");
+    for (let at = 7900; at <= 9900; at += 250) {
+      snapshot = resetService.processPoseSample(pose(at, {}, sourceOptions));
+    }
+    assert.notEqual(snapshot.calibration.calibrationId, previous.calibrationId, "measured T-pose mints a fresh ID");
+    assert.equal(snapshot.tracking.freshCalibrationRequired, false);
+    assert.equal(snapshot.calibration.readiness, "countdown");
+  }
+}
+
+// Uncalibrated accidental loss remains classified as tracking loss, and
+// ordinary calibrated loss still freezes/recovers with its original ID.
+const initialLoss = createAeroBodyGridService({ calibrationIdPrefix: "initial-loss" });
+initialLoss.processPoseSample(pose(0));
+initialLoss.advanceTime(250);
+initialLoss.advanceTime(500);
+snapshot = initialLoss.advanceTime(750);
+assert.equal(snapshot.calibration.invalidationReason, "tracking_lost");
+assert.equal(snapshot.tracking.freshCalibrationRequired, true);
+const ordinaryLoss = createAeroBodyGridService({ calibrationIdPrefix: "ordinary-loss" });
+calibrate(ordinaryLoss, 0);
+for (let at = 2500; at <= 6250; at += 250) {
+  ordinaryLoss.processPoseSample(pose(at, releasedChanges));
+}
+const ordinaryId = ordinaryLoss.getSnapshot().calibration.calibrationId;
+snapshot = ordinaryLoss.processPoseSample(pose(7250, releasedChanges));
+assert.equal(snapshot.tracking.anchorsFrozen, false, "first visible frame clears ordinary gap freeze");
+assert.equal(snapshot.calibration.calibrationId, ordinaryId);
+assert.equal(snapshot.tracking.freshCalibrationRequired, false);
+assert.equal(snapshot.calibration.readiness, "countdown");
+
 // No-frame timeout uses the last real measurement and does not invent evidence.
 const timeoutService = createAeroBodyGridService({ calibrationIdPrefix: "timeout" });
 calibrate(timeoutService, 0);
