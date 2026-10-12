@@ -287,8 +287,16 @@ snapshot = service.processPoseSample(pose(11960, {
   left_elbow: { x: 0.5, y: 0.4 }, left_wrist: { x: 0.46, y: 0.34 },
   right_elbow: { x: 0.5, y: 0.4 }, right_wrist: { x: 0.54, y: 0.34 }
 }));
-assert.ok(snapshot.latestEvidence?.activeBoxingActions.includes("crossed_guard"));
-assert.ok(snapshot.latestEvidence?.activeBoxingActions.includes("weave_left"));
+const swappedGuardEvidence = snapshot.latestEvidence;
+assert.ok(swappedGuardEvidence && isGameplayEvidenceSnapshot(swappedGuardEvidence), "swapped wrists produce valid public measured evidence");
+assert.equal(swappedGuardEvidence.provenance, "measured");
+assert.ok(swappedGuardEvidence.activeBoxingActions.includes("guard"), "hands near the face remain an ordinary guard regardless of wrist order");
+assert.ok(swappedGuardEvidence.activeBoxingActions.includes("weave_left"), "overlapping weave observation survives");
+const swappedLeftWrist = swappedGuardEvidence.anchors.find((anchor) => anchor.anchor === "left_wrist");
+const swappedRightWrist = swappedGuardEvidence.anchors.find((anchor) => anchor.anchor === "right_wrist");
+assert.ok(swappedLeftWrist?.valid && swappedRightWrist?.valid, "both named wrist anchors remain available for scoring");
+assert.ok(swappedLeftWrist.cell !== null && swappedRightWrist.cell !== null, "both wrist cells remain scoreable");
+assert.ok(swappedLeftWrist.x > swappedRightWrist.x, "swapped physical positions retain their original wrist names");
 
 // 750ms sustained three-anchor loss (3+ consecutive fails latch the window) now
 // FREEZES the anchors instead of pausing (0.0.60 F4): the session keeps playing,

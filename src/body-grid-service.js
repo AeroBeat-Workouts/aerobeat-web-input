@@ -916,7 +916,7 @@ export function createAeroBodyGridService(options = {}) {
         Math.max(Math.abs(left.y - nose.y), Math.abs(right.y - nose.y)) <= 0.34 &&
         Math.abs(left.y - right.y) <= 0.24;
       if (handsNearFace) {
-        actions.push(left.x > right.x ? "crossed_guard" : "guard");
+        actions.push("guard");
       }
       if (baselineNose !== null) {
         if (nose.y - baselineNose.y >= 0.12) {

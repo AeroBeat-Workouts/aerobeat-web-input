@@ -43,7 +43,7 @@ Measured evidence supports:
 - every valid measured wrist cell transition, with per-wrist rolling shoulder-relative motion over a bounded tunable window attaching exact eight-way direction only above the minimum-magnitude ambiguity gate;
 - independent semantic and spatial straight continuity with 150ms gap reset;
 - semantic hook/uppercut observations;
-- same-sample standard/crossed guards;
+- same-sample ordinary guard observations for hands near face, including physically swapped wrists while preserving named wrist anchors for gameplay scoring;
 - squat/weave baseline observations;
 - overlapping positive observations;
 - 150ms fresh checkpoint lookup and bounded transition/evidence history.
