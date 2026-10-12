@@ -68,10 +68,10 @@
 //   path, session-coordinator.js:1028). Frames stay inside the ±180 ms
 //   timing window [4820, 5180] around the event center 5000 ms.
 //
-//   For the miss cases the judged frame is held well past the late window
-//   bound (pos 5300 > 5180) so the coordinator finalizes the miss with the
-//   `wrong_direction` diagnostic (`colliderMissDiagnostics`,
-//   session-coordinator.js:1139-1145).
+//   For the miss cases, Play keeps the note pending until the later of the
+//   collider back face (5180 ms) and full camera clearance (6000 ms). A fresh
+//   held-wrist frame at 6001 ms passes that strict deadline and finalizes
+//   `wrong_direction` (`finalizeColliderEvents`/`colliderMissDiagnostics`).
 
 import assert from "node:assert/strict";
 import { isGameplayEvidenceSnapshot, isBodyGridAnchorSnapshot } from "@aerobeat/web-contracts";
@@ -365,10 +365,10 @@ for (const [name, direction, frames] of EIGHT_WAYS) {
 // The authored `up` cue (direction 0) met by a purely horizontal (rightward)
 // motion: each frame's step is ~90° off the authored `up` vector (cosine ~0
 // << cos(45°)), so `matchesAuthoredDirection` fails on every in-window frame
-// and no hit is produced. When the timeline passes the late bound (center +
-// 180ms = 5180ms, strict) the coordinator finalizes a miss and emits
-// `wrong_direction` (session-coordinator.js:1053, 1139-1145). The 5300ms
-// miss frame deliberately holds the wrist still: the held capsule no longer
+// and no hit is produced. The Play miss deadline is the later of the 5180 ms
+// collider back face and 6000 ms full camera clearance; only a timeline
+// strictly past 6000 ms finalizes `wrong_direction`. The fresh 6001 ms miss
+// frame deliberately holds the wrist still: the held capsule no longer
 // contacts the cell, so the miss can only come from the direction-evidence
 // path.
 {
@@ -379,7 +379,7 @@ for (const [name, direction, frames] of EIGHT_WAYS) {
   judgeFrame(coordinator, { x: 0.5875, y: 0.5 }, 4840, 4840, 2);
   assert.deepEqual(judgeFrame(coordinator, { x: 0.6625, y: 0.5 }, 4920, 4920, 3), [], "an out-of-tolerance in-window crossing produces no judgement yet");
   judgeFrame(coordinator, { x: 0.75, y: 0.5 }, 5000, 5000, 4);
-  assert.deepEqual(judgeFrame(coordinator, { x: 0.75, y: 0.5 }, 5300, 5300, 5), [["miss", ["wrong_direction"]]], "an out-of-tolerance crossing finalizes as a miss with the wrong_direction diagnostic");
+  assert.deepEqual(judgeFrame(coordinator, { x: 0.75, y: 0.5 }, 6001, 6001, 5), [["miss", ["wrong_direction"]]], "an out-of-tolerance crossing finalizes as a miss with the wrong_direction diagnostic");
   coordinator.destroy();
 }
 
@@ -412,7 +412,7 @@ for (const [name, direction, frames] of EIGHT_WAYS) {
   judgeFrame(coordinator, { x: 0.625, y: 0.5 }, 4920, 4920, 2);
   assert.deepEqual(judgeFrame(coordinator, { x: 0.7179, y: 0.3885 }, 5000, 5000, 3), [], "a sweep just beyond 45° produces no hit in-window");
   judgeFrame(coordinator, { x: 0.7179, y: 0.3885 }, 5080, 5080, 4);
-  assert.deepEqual(judgeFrame(coordinator, { x: 0.7179, y: 0.3885 }, 5300, 5300, 5), [["miss", ["wrong_direction"]]], "a sweep just beyond the 45° tolerance finalizes as a wrong_direction miss");
+  assert.deepEqual(judgeFrame(coordinator, { x: 0.7179, y: 0.3885 }, 6001, 6001, 5), [["miss", ["wrong_direction"]]], "a sweep just beyond the 45° tolerance finalizes as a wrong_direction miss");
   coordinator.destroy();
 }
 

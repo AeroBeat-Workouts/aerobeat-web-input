@@ -1,0 +1,7 @@
+# Fix the Flow wrong-direction test's Play deadline
+
+**Status:** bounded test-only repair complete in input owner; Bead `aerobeat-web-assembly-orey` remains in progress in assembly ledger pending assembly repin/normal gates. Do not change production Flow scoring or the separately pending physical-phone Flow retake.
+
+The unchanged input fixture `scripts/validate-eight-way-flow-direction.js` expects a `wrong_direction` MISS at 5300 ms for a note centered at 5000 ms. Gameplay's existing Play-only late bound is `max(5180,6000)=6000` ms and commits a miss only when time is **strictly after** that bound. The unchanged fixture therefore observes an event still pending. A read-only in-memory check advanced both final negative samples to fresh 6001 ms and both original wrong-direction assertions passed; the input guard-action fix and gameplay guard-only change did not introduce the mismatch.
+
+Only the two final miss samples and their misleading 5180/5300 commentary changed; fresh measured timestamps and wall times now both read 6001 ms. The in-window no-hit checks and exact `wrong_direction` diagnostics remain intact. Baseline `node scripts/validate-eight-way-flow-direction.js` was RED at line 382 (`actual []`, expected `[["miss",["wrong_direction"]]`); the same focused script after the timing correction is GREEN. `npm run check`, full `npm test`, and `npm run test:browser` all pass. Assembly must repin the clean input SHA/tree and rerun normal browser provenance before acceptance. No served preview/release route was changed.
