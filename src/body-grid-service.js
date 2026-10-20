@@ -21,6 +21,8 @@ import {
 /** @typedef {import("@aerobeat/web-contracts").AeroBodyGridCellEntry} AeroBodyGridCellEntry */
 /** @typedef {import("@aerobeat/web-contracts").AeroGameplayEvidenceSnapshot} AeroGameplayEvidenceSnapshot */
 /** @typedef {import("@aerobeat/web-contracts").AeroBoxingAction} AeroBoxingAction */
+/** @typedef {import("@aerobeat/web-contracts").AeroMeasuredKneePoseSnapshot} AeroMeasuredKneePoseSnapshot */
+/** @typedef {import("@aerobeat/web-contracts").AeroMeasuredKneeLeg} AeroMeasuredKneeLeg */
 /** @typedef {import("@aerobeat/web-contracts").AeroCalibratedBounds} AeroCalibratedBounds */
 
 /** @type {"aero.input.body-grid"} */
@@ -28,6 +30,7 @@ export const aeroBodyGridServiceId = "aero.input.body-grid";
 
 const internalMeasuredNoseParallaxSymbol = Symbol.for("aerobeat.web-input.internal-measured-nose-parallax");
 const minimumParallaxHeadroom = 1e-6;
+const measuredKneeLandmarkNames = Object.freeze(["left_hip", "left_knee", "left_ankle", "right_hip", "right_knee", "right_ankle"]);
 
 /**
  * @typedef {Readonly<{
@@ -814,6 +817,7 @@ export function createAeroBodyGridService(options = {}) {
       return;
     }
     const actions = detectBoxingActions(sample, landmarks, byName);
+    const kneePose = measuredKneePose(sample, landmarks, bounds, calibrationId);
     latestEvidence = deepFreeze({
       schema: "aerobeat/gameplay_evidence_snapshot",
       version: 1,
@@ -822,6 +826,7 @@ export function createAeroBodyGridService(options = {}) {
       measurementTimestampMs: sample.measurementTimestampMs,
       provenance: "measured",
       activeBoxingActions: actions,
+      ...(kneePose === null ? {} : { kneePose }),
       anchors,
       entries
     });
@@ -1229,6 +1234,40 @@ function degradedSetFromLandmarks(landmarks) {
   return lossDecisionAnchorNames.filter((name) => (landmarks.get(name)?.confidence ?? 0) < calibrationDefaults.requiredConfidence);
 }
 
+/**
+ * Project only complete, confident hip/knee/ankle triples from this measured
+ * frame. Do not reuse the held wrist/nose evidence during a dropout: a frozen
+ * upper-body frame must never score another knee or leave a visible knee pad.
+ * @param {AeroPoseRoutingSample} sample
+ * @param {Map<string, NormalizedPoseLandmark>} landmarks
+ * @param {AeroCalibratedBounds} calibratedBounds
+ * @param {string} activeCalibrationId
+ * @returns {AeroMeasuredKneePoseSnapshot | null}
+ */
+function measuredKneePose(sample, landmarks, calibratedBounds, activeCalibrationId) {
+  /** @type {AeroMeasuredKneeLeg[]} */
+  const legs = [];
+  for (const side of [/** @type {const} */ ("left"), /** @type {const} */ ("right")]) {
+    const hip = landmarks.get(`${side}_hip`);
+    const knee = landmarks.get(`${side}_knee`);
+    const ankle = landmarks.get(`${side}_ankle`);
+    if (!hip || !knee || !ankle || [hip, knee, ankle].some((joint) => joint.confidence < calibrationDefaults.requiredConfidence)) continue;
+    /** @param {NormalizedPoseLandmark} joint */
+    const position = (joint) => normalizeAgainstBounds(cameraPreviewToAthlete(joint), calibratedBounds);
+    const points = { hip: position(hip), knee: position(knee), ankle: position(ankle) };
+    if (Object.values(points).some((point) => !Number.isFinite(point.x) || !Number.isFinite(point.y))) continue;
+    legs.push({ side, ...points, confidence: Math.min(hip.confidence, knee.confidence, ankle.confidence) });
+  }
+  return legs.length === 0 ? null : {
+    schema: "aerobeat/measured_knee_pose",
+    version: 1,
+    calibrationId: activeCalibrationId,
+    measuredSourceFrameId: sample.measuredSourceFrameId,
+    measurementTimestampMs: sample.measurementTimestampMs,
+    legs
+  };
+}
+
 /** @param {AeroPoseRoutingSample} sample @returns {Map<string, NormalizedPoseLandmark>} */
 function measuredLandmarkMap(sample) {
   /** @type {Map<string, NormalizedPoseLandmark>} */
@@ -1239,7 +1278,7 @@ function measuredLandmarkMap(sample) {
       continue;
     }
     const name = candidate.name;
-    if (!upperBodyAnchorNames.includes(/** @type {AeroUpperBodyAnchorName} */ (name)) || rejectedNames.has(name)) {
+    if ((!upperBodyAnchorNames.includes(/** @type {AeroUpperBodyAnchorName} */ (name)) && !measuredKneeLandmarkNames.includes(name)) || rejectedNames.has(name)) {
       continue;
     }
     if (map.has(name)) {

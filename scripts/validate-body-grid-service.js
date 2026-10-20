@@ -114,6 +114,44 @@ assert.equal(snapshot.anchors.length, 7);
 assert.ok(snapshot.anchors.every(isBodyGridAnchorSnapshot));
 assert.ok(snapshot.latestEvidence && isGameplayEvidenceSnapshot(snapshot.latestEvidence));
 
+// Optional lower-body measurements remain separate from seven-point calibration
+// and never become frozen/predicted scored knee evidence.
+{
+  const kneeService = createAeroBodyGridService({ calibrationIdPrefix: "measured-knee" });
+  calibrate(kneeService, 0);
+  for (let at = 2500; at <= 5500; at += 250) kneeService.processPoseSample(pose(at, releasedChanges));
+  const lowerJoints = [
+    { name: "left_hip", x: .65, y: .6, confidence: .9 },
+    { name: "left_knee", x: .68, y: .72, confidence: .95 },
+    { name: "left_ankle", x: .69, y: .9, confidence: .8 },
+    { name: "right_hip", x: .35, y: .6, confidence: .9 },
+    { name: "right_knee", x: .32, y: .72, confidence: .95 },
+    { name: "right_ankle", x: .31, y: .9, confidence: .8 }
+  ];
+  const withLegs = (timestampMs, joints = lowerJoints) => ({ ...pose(timestampMs, releasedChanges), landmarks: [...pose(timestampMs, releasedChanges).landmarks, ...joints] });
+  let kneeSnapshot = kneeService.processPoseSample(withLegs(5600));
+  assert.equal(kneeSnapshot.anchors.length, 7, "lower-body joints do not alter upper-body anchor contract");
+  assert.equal(kneeSnapshot.latestEvidence?.kneePose?.legs.length, 2);
+  assert.equal(isGameplayEvidenceSnapshot(kneeSnapshot.latestEvidence), true);
+  assert.deepEqual(kneeSnapshot.latestEvidence?.kneePose?.legs.map((leg) => leg.side), ["left", "right"]);
+  assert.equal(kneeSnapshot.latestEvidence?.kneePose?.legs[0].confidence, .8, "least-visible linked joint gates the leg");
+  assert.ok(kneeSnapshot.latestEvidence.kneePose.legs[0].knee.x < kneeSnapshot.latestEvidence.kneePose.legs[1].knee.x, "camera x is mirrored into athlete space once");
+  kneeSnapshot = kneeService.processPoseSample(withLegs(5610, lowerJoints.map((joint) => joint.name === "right_knee" ? { ...joint, confidence: .2 } : joint)));
+  assert.deepEqual(kneeSnapshot.latestEvidence?.kneePose?.legs.map((leg) => leg.side), ["left"], "one low-confidence side cannot score");
+  kneeSnapshot = kneeService.processPoseSample(withLegs(5620, [...lowerJoints, lowerJoints[1]]));
+  assert.deepEqual(kneeSnapshot.latestEvidence?.kneePose?.legs.map((leg) => leg.side), ["right"], "duplicate lower joint fails closed only for that leg");
+  kneeSnapshot = kneeService.processPoseSample(pose(5630, releasedChanges));
+  assert.equal(Object.hasOwn(kneeSnapshot.latestEvidence, "kneePose"), false, "missing lower body immediately removes old knee data without freezing Flow");
+  kneeSnapshot = kneeService.processPoseSample(withLegs(5640));
+  const measuredKnee = kneeSnapshot.latestEvidence;
+  kneeSnapshot = kneeService.processPoseSample({ ...createMeasuredPoseRoutingSample(withLegs(5641), { routeEpoch: "knee-predicted" }), provenance: "predicted", targetTimestampMs: 5660, predictionHorizonMs: 19 });
+  assert.equal(kneeSnapshot.latestEvidence, measuredKnee, "predicted joints never replace measured knee evidence");
+  kneeSnapshot = kneeService.processPoseSample({ ...withLegs(5650), landmarks: [...withLegs(5650).landmarks, { name: "left_wrist", x: .8, y: .4, confidence: .2 }] });
+  assert.equal(kneeSnapshot.latestEvidence?.provenance, "frozen");
+  assert.equal(Object.hasOwn(kneeSnapshot.latestEvidence, "kneePose"), false, "frozen positions cannot replay a knee hit");
+  kneeService.destroy();
+}
+
 // Camera-preview x is opposed exactly once: camera x=.8 maps to athlete x=.2 (raw ~0).
 const cornerFrame = pose(11100, {
   nose: { x: 0.799999999, y: 0.000000001 },

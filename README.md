@@ -35,7 +35,7 @@ The source owns preview mirroring. Input applies exactly one public transform: c
 
 ## Evidence contract
 
-Only real measurements can calibrate, advance tracking safety, emit cell entries, satisfy checkpoint evidence, or accumulate the 100ms straight interval. Predictions remain separately tagged diagnostics.
+Only real measurements can calibrate, advance tracking safety, emit cell entries, satisfy checkpoint evidence, or accumulate the 100ms straight interval. Predictions remain separately tagged diagnostics. Optional left/right hip–knee–ankle triples are projected into unbounded calibrated athlete coordinates on *the current measured frame only*: an incomplete or low-confidence leg is omitted, and frozen frames cannot replay knee evidence. The seven upper-body T-pose anchors and Flow evidence remain unchanged.
 
 Measured evidence supports:
 
