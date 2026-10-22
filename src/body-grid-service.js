@@ -44,6 +44,23 @@ const measuredKneeLandmarkNames = Object.freeze(["left_hip", "left_knee", "left_
  */
 
 /**
+ * @typedef {Readonly<{
+ *   schema: "aerobeat/measured_knee_visual_pose",
+ *   version: 1,
+ *   calibrationId: string,
+ *   measuredSourceFrameId: string,
+ *   measurementTimestampMs: number,
+ *   legs: readonly Readonly<{
+ *     side: "left" | "right",
+ *     hip: Readonly<{x: number, y: number}>,
+ *     knee: Readonly<{x: number, y: number}>,
+ *     ankle: Readonly<{x: number, y: number}> | null,
+ *     confidence: number
+ *   }>[]
+ * }>} InternalMeasuredKneeVisualPose
+ */
+
+/**
  * @typedef {Object} AeroBodyGridPadding
  * @property {number} left Non-negative fraction of calibrated base width.
  * @property {number} right Non-negative fraction of calibrated base width.
@@ -80,6 +97,7 @@ const measuredKneeLandmarkNames = Object.freeze(["left_hip", "left_knee", "left_
  * @property {readonly AeroBodyGridAnchorSnapshot[]} anchors Latest measured anchors against retained geometry.
  * @property {readonly AeroBodyGridCellEntry[]} entries Entries produced by the latest measurement.
  * @property {AeroGameplayEvidenceSnapshot | null} latestEvidence Latest evidence: the most recent measured frame, or — while `tracking.anchorsFrozen` is true — the held last-measured frame republished under `provenance:"frozen"` with an incrementing `frozenTickId`.
+ * @property {InternalMeasuredKneeVisualPose | null} latestKneeVisualPose Current calibrated measured hip/knee geometry for display only; never scoring evidence.
  * @property {readonly AeroStraightQualificationSnapshot[]} straightQualifications Measured continuity state.
  * @property {boolean} retainedGeometryDimmed Whether retained geometry must be displayed dimmed.
  * @property {boolean} countdownFrozen Whether tracking safety freezes countdown time.
@@ -199,6 +217,7 @@ export function createAeroBodyGridService(options = {}) {
   // (freshCalibrationRequired or trackingPaused) are unaffected by this gate.
   let midGameRecalibrationEnabled = true;
   let latestEvidence = /** @type {AeroGameplayEvidenceSnapshot | null} */ (null);
+  let latestKneeVisualPose = /** @type {InternalMeasuredKneeVisualPose | null} */ (null);
   /** @type {AeroBodyGridAnchorSnapshot[]} */
   let latestAnchors = [];
   /** @type {AeroBodyGridCellEntry[]} */
@@ -252,6 +271,7 @@ export function createAeroBodyGridService(options = {}) {
       anchors: latestAnchors,
       entries: latestEntries,
       latestEvidence,
+      latestKneeVisualPose,
       straightQualifications: qualificationSnapshots(timestampMs, straightStates),
       retainedGeometryDimmed: bounds !== null && (freshCalibrationRequired || calibrationState === "recalibrating" || calibrationState === "tracking_lost" || calibrationState === "invalidated"),
       countdownFrozen: trackingPaused,
@@ -302,6 +322,7 @@ export function createAeroBodyGridService(options = {}) {
     invalidationReason = reason;
     freshCalibrationRequired = true;
     latestEvidence = null;
+    latestKneeVisualPose = null;
     latestEntries = [];
     latestMeasuredNoseParallax = null;
     holdStartedAt = null;
@@ -343,6 +364,7 @@ export function createAeroBodyGridService(options = {}) {
    * degraded.
    */
   function enterTrackingFreeze() {
+    latestKneeVisualPose = null;
     anchorsFrozen = true;
     frozenTickId = 0;
     calibrationState = "tracking_lost";
@@ -385,6 +407,7 @@ export function createAeroBodyGridService(options = {}) {
    * they never enter the measured evidence history.
    */
   function publishFrozenEvidence() {
+    latestKneeVisualPose = null;
     if (heldEvidence === null || calibrationId === null) {
       return;
     }
@@ -469,9 +492,14 @@ export function createAeroBodyGridService(options = {}) {
     const sample = normalizeSample(input);
     if (sample === null) {
       latestMeasuredNoseParallax = null;
+      if (latestKneeVisualPose !== null) {
+        latestKneeVisualPose = null;
+        return publish();
+      }
       return latestSnapshot;
     }
     if (sample.provenance === "predicted") {
+      latestKneeVisualPose = null;
       predictedSampleCount += 1;
       latestPredictedTimestamp = sample.targetTimestampMs;
       return publish();
@@ -479,6 +507,10 @@ export function createAeroBodyGridService(options = {}) {
     if (lastMeasuredAt !== null && sample.measurementTimestampMs < lastMeasuredAt) {
       latestMeasuredNoseParallax = null;
       resetWristMotionHistories();
+      if (latestKneeVisualPose !== null) {
+        latestKneeVisualPose = null;
+        return publish();
+      }
       return latestSnapshot;
     }
     if (
@@ -486,6 +518,10 @@ export function createAeroBodyGridService(options = {}) {
       `${sample.sourceId}\u0000${sample.measuredSourceFrameId}` === lastMeasuredSourceFrameKey
     ) {
       latestMeasuredNoseParallax = null;
+      if (latestKneeVisualPose !== null) {
+        latestKneeVisualPose = null;
+        return publish();
+      }
       return latestSnapshot;
     }
     if (lastMeasuredAt !== null && sample.measurementTimestampMs - lastMeasuredAt >= calibrationDefaults.trackingLossPauseMs) {
@@ -718,6 +754,7 @@ export function createAeroBodyGridService(options = {}) {
       return;
     }
     const scoringValid = allRequiredAnchorsVisible && !trackingPaused && !freshCalibrationRequired;
+    latestKneeVisualPose = null;
     /** @type {AeroBodyGridAnchorSnapshot[]} */
     const anchors = [];
     /** @type {AeroBodyGridCellEntry[]} */
@@ -818,6 +855,7 @@ export function createAeroBodyGridService(options = {}) {
     }
     const actions = detectBoxingActions(sample, landmarks, byName);
     const kneePose = measuredKneePose(sample, landmarks, bounds, calibrationId);
+    latestKneeVisualPose = measuredKneeVisualPose(sample, landmarks, bounds, calibrationId);
     latestEvidence = deepFreeze({
       schema: "aerobeat/gameplay_evidence_snapshot",
       version: 1,
@@ -1030,6 +1068,7 @@ export function createAeroBodyGridService(options = {}) {
     latestAnchors = [];
     latestEntries = [];
     latestEvidence = null;
+    latestKneeVisualPose = null;
     heldEvidence = null;
     evidenceHistory.length = 0;
   }
@@ -1041,6 +1080,7 @@ export function createAeroBodyGridService(options = {}) {
     }
     timestampMs = nextTimestamp;
     latestMeasuredNoseParallax = null;
+    latestKneeVisualPose = null;
     allRequiredAnchorsVisible = false;
     // No fresh measured sample arrived: the missed frame counts as one
     // consecutive failure. The latch is what admits the measured window;
@@ -1105,6 +1145,7 @@ export function createAeroBodyGridService(options = {}) {
     degradedAnchors = [];
     heldEvidence = null;
     latestEvidence = null;
+    latestKneeVisualPose = null;
     latestMeasuredNoseParallax = null;
     baselineNose = null;
     latestAnchors = [];
@@ -1260,6 +1301,48 @@ function measuredKneePose(sample, landmarks, calibratedBounds, activeCalibration
   }
   return legs.length === 0 ? null : {
     schema: "aerobeat/measured_knee_pose",
+    version: 1,
+    calibrationId: activeCalibrationId,
+    measuredSourceFrameId: sample.measuredSourceFrameId,
+    measurementTimestampMs: sample.measurementTimestampMs,
+    legs
+  };
+}
+
+/**
+ * Display-only measured leg geometry; the scored knee pose above deliberately
+ * retains its three-joint confidence gate. Both use the same unbounded athlete
+ * calibration transform, but no ankle is inferred from a visible hip/knee.
+ * @param {AeroPoseRoutingSample} sample
+ * @param {Map<string, NormalizedPoseLandmark>} landmarks
+ * @param {AeroCalibratedBounds} calibratedBounds
+ * @param {string} activeCalibrationId
+ * @returns {InternalMeasuredKneeVisualPose | null}
+ */
+function measuredKneeVisualPose(sample, landmarks, calibratedBounds, activeCalibrationId) {
+  /** @type {InternalMeasuredKneeVisualPose["legs"][number][]} */
+  const legs = [];
+  for (const side of /** @type {const} */ (["left", "right"])) {
+    const hip = landmarks.get(`${side}_hip`);
+    const knee = landmarks.get(`${side}_knee`);
+    const ankle = landmarks.get(`${side}_ankle`);
+    if (!hip || !knee || hip.confidence < calibrationDefaults.requiredConfidence || knee.confidence < calibrationDefaults.requiredConfidence) continue;
+    /** @param {NormalizedPoseLandmark} joint */
+    const position = (joint) => normalizeAgainstBounds(cameraPreviewToAthlete(joint), calibratedBounds);
+    const hipPoint = position(hip);
+    const kneePoint = position(knee);
+    if (![hipPoint, kneePoint].every((point) => Number.isFinite(point.x) && Number.isFinite(point.y))) continue;
+    const anklePoint = ankle && ankle.confidence >= calibrationDefaults.requiredConfidence ? position(ankle) : null;
+    legs.push({
+      side,
+      hip: hipPoint,
+      knee: kneePoint,
+      ankle: anklePoint && Number.isFinite(anklePoint.x) && Number.isFinite(anklePoint.y) ? anklePoint : null,
+      confidence: Math.min(hip.confidence, knee.confidence)
+    });
+  }
+  return legs.length === 0 ? null : {
+    schema: "aerobeat/measured_knee_visual_pose",
     version: 1,
     calibrationId: activeCalibrationId,
     measuredSourceFrameId: sample.measuredSourceFrameId,
