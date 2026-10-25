@@ -22,13 +22,11 @@ The prior viewport-clamped bucketing path is removed. Legacy draft routing now u
 ## Calibration contract
 
 - Automatic measured-only T-pose capture; no bootstrap and no persistence.
-- Seven upper-body anchors individually require confidence `>= 0.5`.
-- Wrist/elbow vertical ratios are `<= 0.35`; elbow angles are `>= 130deg`.
-- Qualified hold and cooldown are both 4000ms; all qualified hold samples are averaged.
-- Pose release is required before refire.
-- Source/media identity, mirror, or source-aspect changes invalidate scoring.
-- Old bounds remain only as dim display geometry during loss/recalibration and are atomically replaced.
-- Sustained measured-anchor loss or a 500ms no-frame gap pauses, clears anchors/evidence/history, freezes countdown participation, and requires fresh calibration.
+- Seven upper-body anchors—nose, left/right shoulders, elbows, and wrists—individually require confidence `>= 0.5`. Knee visibility is **not yet** a calibration gate; the proposed Boxing-specific checklist and knee requirement are separate future work.
+- A T-pose requires nonzero shoulder width; each wrist and elbow must be within `0.35 × shoulder width` vertically of its shoulder, and each shoulder–elbow–wrist angle must be `>= 130°`. A nonzero wrist span is also needed to form the calibrated bounds.
+- Qualified hold and cooldown are both **2000ms**; all qualified hold samples are averaged. Pose release is required before a later recalibration refire.
+- Source/media identity, mirror, or source-aspect changes invalidate scoring. Old bounds remain only as dim display geometry during loss/recalibration and are atomically replaced.
+- Once the consecutive-failure hysteresis has latched and nose or wrist tracking has been missing for **750ms** (including a no-frame gap), the loss gate trips. With existing calibrated bounds and held evidence, the input freezes anchors instead of immediately pausing or demanding a new T-pose; the next good frame clears the freeze. Without that state, tracking pauses and requires fresh calibration.
 - Malformed, duplicate-anchor, duplicate-frame, and timestamp-rollback input cannot mutate scoring truth; one failing subscriber cannot interrupt other subscribers or pose processing.
 
 The source owns preview mirroring. Input applies exactly one public transform: camera `(x,y)` becomes athlete `(1-x,y)`. The calibrated grid is top-left row-major (`0..11`) with an 8x6 subgrid (`0..47`). Mapping never clamps; out-of-grid anchors preserve raw diagnostics and expose null scoring cells.
