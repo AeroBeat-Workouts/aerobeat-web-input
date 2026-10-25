@@ -88,6 +88,7 @@ snapshot = calibrate(service, 1000);
 assert.equal(snapshot.calibration.state, "cooldown");
 assert.equal(snapshot.calibration.readiness, "countdown");
 assert.equal(snapshot.calibration.calibrationId, "test-1");
+assert.equal(snapshot.calibratedShoulderWorldY, 1, "the averaged shoulder center is world Y=1 with default symmetric bounds");
 assert.equal(snapshot.calibration.releaseRequired, true);
 assert.equal(snapshot.calibration.cooldownRemainingMs, 2000, "cooldown now comes from the 2000ms contract");
 assert.ok(isCalibrationSnapshot(snapshot.calibration));
@@ -919,6 +920,10 @@ const paddedBounds = snapshot.calibration.bounds;
 assert.ok(paddedBounds);
 assert.ok(Math.abs((paddedBounds.right - paddedBounds.left) - 0.72) < 1e-9);
 assert.ok(Math.abs((paddedBounds.bottom - paddedBounds.top) - 0.63) < 1e-9);
+assert.ok(Math.abs(snapshot.calibratedShoulderWorldY - 1) < 1e-9, "symmetric padding keeps the shoulder baseline centered");
+const unevenPadding = createAeroBodyGridService({ calibrationIdPrefix: "uneven-shoulder", sourceAspectRatio: 1, padding: { top: 0.2 } });
+snapshot = calibrate(unevenPadding, 0, { sourceAspectRatio: 1 });
+assert.ok(Math.abs(snapshot.calibratedShoulderWorldY - 0.75) < 1e-9, "asymmetric padding projects the actual averaged shoulder center, not a hardcoded row");
 
 // A sparse pair of frames cannot masquerade as a sustained two-second hold.
 const sparseHold = createAeroBodyGridService({ calibrationIdPrefix: "sparse" });

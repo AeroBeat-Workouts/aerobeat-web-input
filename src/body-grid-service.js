@@ -99,6 +99,7 @@ const calibrationVisibilityNames = Object.freeze([...upperBodyAnchorNames, "left
  * @property {readonly AeroBodyGridCellEntry[]} entries Entries produced by the latest measurement.
  * @property {AeroGameplayEvidenceSnapshot | null} latestEvidence Latest evidence: the most recent measured frame, or — while `tracking.anchorsFrozen` is true — the held last-measured frame republished under `provenance:"frozen"` with an incrementing `frozenTickId`.
  * @property {InternalMeasuredKneeVisualPose | null} latestKneeVisualPose Current calibrated measured hip/knee geometry for display only; never scoring evidence.
+ * @property {number | null} calibratedShoulderWorldY Average T-pose shoulder height projected into judge/world Y; retained with the current calibration generation.
  * @property {Readonly<{kneesRequired:boolean,measuredAt:number|null,visible:Readonly<Record<string,boolean>>,armsLevel:boolean,elbowsStraight:boolean,validSpan:boolean,qualified:boolean}>} calibrationChecklist Current measured-frame calibration conditions; never scoring evidence.
  * @property {readonly AeroStraightQualificationSnapshot[]} straightQualifications Measured continuity state.
  * @property {boolean} retainedGeometryDimmed Whether retained geometry must be displayed dimmed.
@@ -181,6 +182,7 @@ export function createAeroBodyGridService(options = {}) {
   let calibrationSequence = 0;
   let calibrationId = /** @type {string | null} */ (null);
   let bounds = /** @type {AeroCalibratedBounds | null} */ (null);
+  let calibratedShoulderWorldY = /** @type {number | null} */ (null);
   let baselineNose = /** @type {{x: number, y: number} | null} */ (null);
   let calibrationState = /** @type {import("@aerobeat/web-contracts").AeroCalibrationState} */ ("uncalibrated");
   let readiness = /** @type {import("@aerobeat/web-contracts").AeroReadinessState} */ ("calibration_required");
@@ -277,6 +279,7 @@ export function createAeroBodyGridService(options = {}) {
       entries: latestEntries,
       latestEvidence,
       latestKneeVisualPose,
+      calibratedShoulderWorldY,
       calibrationChecklist,
       straightQualifications: qualificationSnapshots(timestampMs, straightStates),
       retainedGeometryDimmed: bounds !== null && (freshCalibrationRequired || calibrationState === "recalibrating" || calibrationState === "tracking_lost" || calibrationState === "invalidated"),
@@ -740,6 +743,7 @@ export function createAeroBodyGridService(options = {}) {
       resetStraightStates();
     }
     bounds = nextGeometry.bounds;
+    calibratedShoulderWorldY = 2.5 - 3 * nextGeometry.normalizedShoulderY;
     baselineNose = nextGeometry.nose;
     invalidationReason = null;
     freshCalibrationRequired = false;
@@ -1162,6 +1166,7 @@ export function createAeroBodyGridService(options = {}) {
     calibrationChecklist = calibrationStatus(null, kneeVisibilityRequired, null);
     latestMeasuredNoseParallax = null;
     baselineNose = null;
+    calibratedShoulderWorldY = null;
     latestAnchors = [];
     latestEntries = [];
     holdFrames = [];
@@ -1507,7 +1512,7 @@ function calibratedGeometry(landmarks, aspect, padding) {
     top: centerY - baseHeight / 2 - baseHeight * padding.top,
     bottom: centerY + baseHeight / 2 + baseHeight * padding.bottom
   };
-  return { bounds, nose: normalizeAgainstBounds(athleteNose, bounds) };
+  return { bounds, nose: normalizeAgainstBounds(athleteNose, bounds), normalizedShoulderY: normalizeAgainstBounds({ x: centerX, y: centerY }, bounds).y };
 }
 
 /** @param {{x: number, y: number}} point @param {AeroCalibratedBounds} bounds */
