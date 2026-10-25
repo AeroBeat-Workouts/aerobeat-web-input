@@ -970,6 +970,58 @@ for (let at = 0; at <= 2000; at += 250) {
 }
 assert.equal(exactConfidence.getSnapshot().calibration.calibrationId, "confidence-exact-1");
 
+// Boxing's Knee strikes toggle, not its strike chance, determines whether BOTH
+// current measured knees must share every qualified T-pose frame. Flow/ordinary
+// Boxing still use only the seven upper-body anchors tested above.
+function poseWithKnees(timestampMs, leftConfidence = 0.95, rightConfidence = 0.95) {
+  const sample = pose(timestampMs);
+  return { ...sample, landmarks: [
+    ...sample.landmarks,
+    { name: "left_knee", x: 0.6, y: 0.75, confidence: leftConfidence },
+    { name: "right_knee", x: 0.4, y: 0.75, confidence: rightConfidence }
+  ] };
+}
+const conditionalKnees = createAeroBodyGridService({ calibrationIdPrefix: "conditional-knees" });
+assert.throws(() => conditionalKnees.setKneeVisibilityRequired(/** @type {boolean} */ (/** @type {unknown} */ (0))), /must be boolean/u);
+conditionalKnees.setKneeVisibilityRequired(true);
+for (let at = 0; at <= 2000; at += 250) conditionalKnees.processPoseSample(pose(at));
+assert.equal(conditionalKnees.getSnapshot().calibration.calibrationId, null, "upper-body T-pose without knees cannot calibrate knee-enabled Boxing even at 0% chance");
+snapshot = conditionalKnees.processPoseSample(poseWithKnees(2250, 0.5, 0.499));
+assert.equal(snapshot.calibrationChecklist.visible.left_knee, true, "exact .5 knee confidence is visible");
+assert.equal(snapshot.calibrationChecklist.visible.right_knee, false, "one flickering knee fails independently");
+assert.equal(snapshot.calibrationChecklist.qualified, false);
+assert.equal(snapshot.calibration.holdProgressMs, 0);
+for (let at = 2500; at <= 3500; at += 250) conditionalKnees.processPoseSample(poseWithKnees(at));
+assert.equal(conditionalKnees.getSnapshot().calibration.holdProgressMs, 1000);
+snapshot = conditionalKnees.processPoseSample(poseWithKnees(3750, 0.499, 0.95));
+assert.equal(snapshot.calibrationChecklist.visible.left_knee, false, "left knee flickers off on this measured frame");
+assert.equal(snapshot.calibrationChecklist.visible.right_knee, true);
+assert.equal(snapshot.calibration.holdProgressMs, 0, "one dropped knee resets the simultaneous T-pose hold");
+for (let at = 4000; at <= 6000; at += 250) conditionalKnees.processPoseSample(poseWithKnees(at, 0.5, 0.5));
+assert.equal(conditionalKnees.getSnapshot().calibration.calibrationId, "conditional-knees-1");
+assert.ok(Object.isFrozen(conditionalKnees.getSnapshot().calibrationChecklist.visible));
+snapshot = conditionalKnees.advanceTime(6250);
+assert.equal(snapshot.calibrationChecklist.measuredAt, null, "no-frame ticks cannot replay knee visibility");
+assert.equal(snapshot.calibrationChecklist.visible.left_knee, false);
+const missingKneeFrame = createAeroBodyGridService({ calibrationIdPrefix: "missing-knee-frame" });
+missingKneeFrame.setKneeVisibilityRequired(true);
+for (let at = 0; at <= 500; at += 250) missingKneeFrame.processPoseSample(poseWithKnees(at));
+assert.equal(missingKneeFrame.getSnapshot().calibration.holdProgressMs, 500);
+snapshot = missingKneeFrame.advanceTime(625);
+assert.equal(snapshot.calibration.holdProgressMs, 0, "a no-frame tick interrupts the simultaneous knee hold");
+snapshot = missingKneeFrame.processPoseSample(poseWithKnees(750));
+assert.equal(snapshot.calibration.holdProgressMs, 0, "resumed measurements start a new hold");
+const toggledKnees = createAeroBodyGridService({ calibrationIdPrefix: "toggled-knees" });
+toggledKnees.setKneeVisibilityRequired(true);
+for (let at = 0; at <= 500; at += 250) toggledKnees.processPoseSample(poseWithKnees(at));
+assert.equal(toggledKnees.getSnapshot().calibration.holdProgressMs, 500);
+snapshot = toggledKnees.setKneeVisibilityRequired(false);
+assert.equal(snapshot.calibration.holdProgressMs, 0, "a knee-mode switch restarts an unfinished T-pose");
+assert.equal(snapshot.calibrationChecklist.kneesRequired, false);
+assert.equal(snapshot.calibrationChecklist.measuredAt, null);
+for (let at = 750; at <= 2750; at += 250) toggledKnees.processPoseSample(pose(at));
+assert.equal(toggledKnees.getSnapshot().calibration.calibrationId, "toggled-knees-1", "knee-disabled Boxing/Flow calibrates without knees");
+
 // Wrist/elbow alignment and both elbow angles are independent T-pose gates.
 for (const [label, changes] of [
   ["left-wrist-ratio", { left_wrist: { x: 0.8, y: 0.471 } }],

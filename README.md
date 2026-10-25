@@ -22,7 +22,7 @@ The prior viewport-clamped bucketing path is removed. Legacy draft routing now u
 ## Calibration contract
 
 - Automatic measured-only T-pose capture; no bootstrap and no persistence.
-- Seven upper-body anchors—nose, left/right shoulders, elbows, and wrists—individually require confidence `>= 0.5`. Knee visibility is **not yet** a calibration gate; the proposed Boxing-specific checklist and knee requirement are separate future work.
+- Seven upper-body anchors—nose, left/right shoulders, elbows, and wrists—individually require confidence `>= 0.5`. When the composing game enables the Boxing Knee strikes calibration requirement, both measured knees also need `>= 0.5` confidence in the **same T-pose frames**, even if Knee strike chance is 0%; Flow and knee-disabled Boxing still require only the original seven. Knee calibration visibility does not replace the stricter hip+knee+ankle evidence for scoring.
 - A T-pose requires nonzero shoulder width; each wrist and elbow must be within `0.35 × shoulder width` vertically of its shoulder, and each shoulder–elbow–wrist angle must be `>= 130°`. A nonzero wrist span is also needed to form the calibrated bounds.
 - Qualified hold and cooldown are both **2000ms**; all qualified hold samples are averaged. Pose release is required before a later recalibration refire.
 - Source/media identity, mirror, or source-aspect changes invalidate scoring. Old bounds remain only as dim display geometry during loss/recalibration and are atomically replaced.

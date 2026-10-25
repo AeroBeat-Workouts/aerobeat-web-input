@@ -31,6 +31,7 @@ export const aeroBodyGridServiceId = "aero.input.body-grid";
 const internalMeasuredNoseParallaxSymbol = Symbol.for("aerobeat.web-input.internal-measured-nose-parallax");
 const minimumParallaxHeadroom = 1e-6;
 const measuredKneeLandmarkNames = Object.freeze(["left_hip", "left_knee", "left_ankle", "right_hip", "right_knee", "right_ankle"]);
+const calibrationVisibilityNames = Object.freeze([...upperBodyAnchorNames, "left_knee", "right_knee"]);
 
 /**
  * @typedef {Readonly<{
@@ -98,6 +99,7 @@ const measuredKneeLandmarkNames = Object.freeze(["left_hip", "left_knee", "left_
  * @property {readonly AeroBodyGridCellEntry[]} entries Entries produced by the latest measurement.
  * @property {AeroGameplayEvidenceSnapshot | null} latestEvidence Latest evidence: the most recent measured frame, or — while `tracking.anchorsFrozen` is true — the held last-measured frame republished under `provenance:"frozen"` with an incrementing `frozenTickId`.
  * @property {InternalMeasuredKneeVisualPose | null} latestKneeVisualPose Current calibrated measured hip/knee geometry for display only; never scoring evidence.
+ * @property {Readonly<{kneesRequired:boolean,measuredAt:number|null,visible:Readonly<Record<string,boolean>>,armsLevel:boolean,elbowsStraight:boolean,validSpan:boolean,qualified:boolean}>} calibrationChecklist Current measured-frame calibration conditions; never scoring evidence.
  * @property {readonly AeroStraightQualificationSnapshot[]} straightQualifications Measured continuity state.
  * @property {boolean} retainedGeometryDimmed Whether retained geometry must be displayed dimmed.
  * @property {boolean} countdownFrozen Whether tracking safety freezes countdown time.
@@ -111,6 +113,7 @@ const measuredKneeLandmarkNames = Object.freeze(["left_hip", "left_knee", "left_
  * @property {(sample: AeroPoseRoutingSample | NormalizedPoseFrame, context?: AeroBodyGridSampleContext) => AeroBodyGridServiceSnapshot} processPoseSample Process one measured or explicitly predicted sample.
  * @property {(timestampMs: number) => AeroBodyGridServiceSnapshot} advanceTime Detect no-frame tracking loss without inventing pose evidence. While the anchors are frozen, also ticks the held-evidence publication (new frozenTickId) without touching the anchors.
  * @property {(reason?: string) => AeroBodyGridServiceSnapshot} resetCalibration Explicitly invalidate and retain dim geometry pending replacement.
+ * @property {(required:boolean) => AeroBodyGridServiceSnapshot} setKneeVisibilityRequired Restart an in-progress hold when the active calibration mode changes.
  * @property {(timestampMs: number, maximumAgeMs?: number) => AeroGameplayEvidenceSnapshot | null} getFreshEvidence Return current measured evidence only when safe and fresh.
  * @property {() => readonly AeroGameplayEvidenceSnapshot[]} getEvidenceHistory Return bounded immutable measured history.
  * @property {() => AeroBodyGridServiceSnapshot} getSnapshot Return latest immutable snapshot.
@@ -207,6 +210,8 @@ export function createAeroBodyGridService(options = {}) {
   /** Alias for the contracts constant; the local accumulator is named after its semantics. */
   const recoveryHoldMsContract = recoveryHoldMs;
   let allRequiredAnchorsVisible = false;
+  let kneeVisibilityRequired = false;
+  let calibrationChecklist = calibrationStatus(null, kneeVisibilityRequired, null);
   let trackingPaused = false;
   let freshCalibrationRequired = true;
   // Mid-game T-pose recalibration gesture gate. The assembly disables this while
@@ -272,6 +277,7 @@ export function createAeroBodyGridService(options = {}) {
       entries: latestEntries,
       latestEvidence,
       latestKneeVisualPose,
+      calibrationChecklist,
       straightQualifications: qualificationSnapshots(timestampMs, straightStates),
       retainedGeometryDimmed: bounds !== null && (freshCalibrationRequired || calibrationState === "recalibrating" || calibrationState === "tracking_lost" || calibrationState === "invalidated"),
       countdownFrozen: trackingPaused,
@@ -548,6 +554,7 @@ export function createAeroBodyGridService(options = {}) {
     }
 
     const landmarks = measuredLandmarkMap(sample);
+    calibrationChecklist = calibrationStatus(landmarks, kneeVisibilityRequired, sample.measurementTimestampMs);
     const lossAnchorsVisible = lossDecisionAnchorNames.every((name) => (landmarks.get(name)?.confidence ?? 0) >= calibrationDefaults.requiredConfidence);
     allRequiredAnchorsVisible = lossAnchorsVisible && upperBodyAnchorNames.every((name) => (landmarks.get(name)?.confidence ?? 0) >= calibrationDefaults.requiredConfidence);
     if (lossAnchorsVisible) {
@@ -624,8 +631,7 @@ export function createAeroBodyGridService(options = {}) {
     // remain active, so a T-pose held during a move no longer commits a new
     // calibration generation that would pause the game.
     const midGameGestureBlocked = ordinaryHealthyRefire && !midGameRecalibrationEnabled;
-    const qualified = !midGameGestureBlocked && allRequiredAnchorsVisible &&
-      qualifiesTPose(landmarks) &&
+    const qualified = !midGameGestureBlocked && calibrationChecklist.qualified &&
       (!ordinaryHealthyRefire || wristsInsideCalibratedBounds(landmarks, bounds));
     if (calibrationId !== null && !releaseObserved && !qualified) {
       releaseObserved = true;
@@ -1082,6 +1088,12 @@ export function createAeroBodyGridService(options = {}) {
     latestMeasuredNoseParallax = null;
     latestKneeVisualPose = null;
     allRequiredAnchorsVisible = false;
+    calibrationChecklist = calibrationStatus(null, kneeVisibilityRequired, null);
+    if (kneeVisibilityRequired && holdStartedAt !== null) {
+      holdStartedAt = null;
+      holdFrames = [];
+      if (calibrationState === "holding") calibrationState = "uncalibrated";
+    }
     // No fresh measured sample arrived: the missed frame counts as one
     // consecutive failure. The latch is what admits the measured window;
     // before it the window keeps counting but cannot trip the pause.
@@ -1118,6 +1130,7 @@ export function createAeroBodyGridService(options = {}) {
     }
     trackingPaused = true;
     invalidateCalibration(reason);
+    calibrationChecklist = calibrationStatus(null, kneeVisibilityRequired, null);
     return publish();
   }
 
@@ -1146,6 +1159,7 @@ export function createAeroBodyGridService(options = {}) {
     heldEvidence = null;
     latestEvidence = null;
     latestKneeVisualPose = null;
+    calibrationChecklist = calibrationStatus(null, kneeVisibilityRequired, null);
     latestMeasuredNoseParallax = null;
     baselineNose = null;
     latestAnchors = [];
@@ -1182,6 +1196,17 @@ export function createAeroBodyGridService(options = {}) {
     processPoseSample,
     advanceTime,
     resetCalibration,
+    setKneeVisibilityRequired(required) {
+      if (destroyed || kneeVisibilityRequired === required) return latestSnapshot;
+      if (typeof required !== "boolean") throw new TypeError("Knee calibration requirement must be boolean");
+      kneeVisibilityRequired = required;
+      holdStartedAt = null;
+      holdFrames = [];
+      calibrationChecklist = calibrationStatus(null, kneeVisibilityRequired, null);
+      if (calibrationState === "holding") calibrationState = "uncalibrated";
+      else if (calibrationState === "recalibrating" && !freshCalibrationRequired) calibrationState = "calibrated";
+      return publish();
+    },
     setMidGameRecalibrationEnabled(enabled) {
       if (destroyed) return;
       midGameRecalibrationEnabled = enabled === true;
@@ -1382,30 +1407,37 @@ function measuredLandmarkMap(sample) {
   return map;
 }
 
-/** @param {Map<string, NormalizedPoseLandmark>} landmarks */
-function qualifiesTPose(landmarks) {
-  const leftShoulder = landmarks.get("left_shoulder");
-  const rightShoulder = landmarks.get("right_shoulder");
-  const leftElbow = landmarks.get("left_elbow");
-  const rightElbow = landmarks.get("right_elbow");
-  const leftWrist = landmarks.get("left_wrist");
-  const rightWrist = landmarks.get("right_wrist");
-  if (!leftShoulder || !rightShoulder || !leftElbow || !rightElbow || !leftWrist || !rightWrist) {
-    return false;
-  }
-  const shoulderWidth = distance(leftShoulder, rightShoulder);
-  if (shoulderWidth <= Number.EPSILON) {
-    return false;
-  }
-  const aligned = [
+/**
+ * Read-only current measured-frame checklist. Calibration consumes this same
+ * result, so displayed conditions never disagree with the T-pose hold gate.
+ * @param {Map<string, NormalizedPoseLandmark> | null} landmarks
+ * @param {boolean} kneesRequired
+ * @param {number | null} measuredAt
+ */
+function calibrationStatus(landmarks, kneesRequired, measuredAt) {
+  const visible = Object.fromEntries(calibrationVisibilityNames.map((name) => [name, (landmarks?.get(name)?.confidence ?? 0) >= calibrationDefaults.requiredConfidence]));
+  const leftShoulder = landmarks?.get("left_shoulder");
+  const rightShoulder = landmarks?.get("right_shoulder");
+  const leftElbow = landmarks?.get("left_elbow");
+  const rightElbow = landmarks?.get("right_elbow");
+  const leftWrist = landmarks?.get("left_wrist");
+  const rightWrist = landmarks?.get("right_wrist");
+  const shoulderWidth = leftShoulder && rightShoulder ? distance(leftShoulder, rightShoulder) : 0;
+  const validSpan = shoulderWidth > Number.EPSILON && leftWrist && rightWrist
+    ? Math.abs(leftWrist.x - rightWrist.x) > Number.EPSILON : false;
+  const armsLevel = Boolean(validSpan && leftElbow && rightElbow && [
     Math.abs(leftWrist.y - leftShoulder.y) / shoulderWidth,
     Math.abs(rightWrist.y - rightShoulder.y) / shoulderWidth,
     Math.abs(leftElbow.y - leftShoulder.y) / shoulderWidth,
     Math.abs(rightElbow.y - rightShoulder.y) / shoulderWidth
-  ].every((ratio) => ratio <= calibrationDefaults.wristElbowVerticalRatio);
-  return aligned &&
+  ].every((ratio) => ratio <= calibrationDefaults.wristElbowVerticalRatio));
+  const elbowsStraight = Boolean(validSpan && leftElbow && rightElbow &&
     angleDegrees(leftShoulder, leftElbow, leftWrist) >= calibrationDefaults.minimumElbowAngleDeg &&
-    angleDegrees(rightShoulder, rightElbow, rightWrist) >= calibrationDefaults.minimumElbowAngleDeg;
+    angleDegrees(rightShoulder, rightElbow, rightWrist) >= calibrationDefaults.minimumElbowAngleDeg);
+  const requiredVisible = upperBodyAnchorNames.every((name) => visible[name]) &&
+    (!kneesRequired || (visible.left_knee && visible.right_knee));
+  return Object.freeze({ kneesRequired, measuredAt, visible: Object.freeze(visible), armsLevel, elbowsStraight,
+    validSpan: Boolean(validSpan), qualified: Boolean(requiredVisible && armsLevel && elbowsStraight) });
 }
 
 /** @param {Map<string, NormalizedPoseLandmark>} landmarks @param {AeroCalibratedBounds | null} activeBounds */
