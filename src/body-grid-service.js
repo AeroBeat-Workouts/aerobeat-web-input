@@ -1091,9 +1091,12 @@ export function createAeroBodyGridService(options = {}) {
     timestampMs = nextTimestamp;
     latestMeasuredNoseParallax = null;
     latestKneeVisualPose = null;
-    allRequiredAnchorsVisible = false;
-    calibrationChecklist = calibrationStatus(null, kneeVisibilityRequired, null);
-    if (kneeVisibilityRequired && holdStartedAt !== null) {
+    // Waiting for inference is not a measured failure. Retain the last
+    // checklist and qualified samples until the real measurement expires;
+    // idle ticks never add hold samples or refresh the checklist timestamp.
+    if (lastMeasuredAt === null || nextTimestamp - lastMeasuredAt >= calibrationDefaults.trackingLossPauseMs) {
+      allRequiredAnchorsVisible = false;
+      calibrationChecklist = calibrationStatus(null, kneeVisibilityRequired, null);
       holdStartedAt = null;
       holdFrames = [];
       if (calibrationState === "holding") calibrationState = "uncalibrated";

@@ -1006,16 +1006,95 @@ for (let at = 4000; at <= 6000; at += 250) conditionalKnees.processPoseSample(po
 assert.equal(conditionalKnees.getSnapshot().calibration.calibrationId, "conditional-knees-1");
 assert.ok(Object.isFrozen(conditionalKnees.getSnapshot().calibrationChecklist.visible));
 snapshot = conditionalKnees.advanceTime(6250);
-assert.equal(snapshot.calibrationChecklist.measuredAt, null, "no-frame ticks cannot replay knee visibility");
-assert.equal(snapshot.calibrationChecklist.visible.left_knee, false);
+assert.equal(snapshot.calibrationChecklist.measuredAt, 6000, "ordinary idle ticks retain the real checklist timestamp");
+assert.equal(snapshot.calibrationChecklist.visible.left_knee, true);
 const missingKneeFrame = createAeroBodyGridService({ calibrationIdPrefix: "missing-knee-frame" });
 missingKneeFrame.setKneeVisibilityRequired(true);
 for (let at = 0; at <= 500; at += 250) missingKneeFrame.processPoseSample(poseWithKnees(at));
 assert.equal(missingKneeFrame.getSnapshot().calibration.holdProgressMs, 500);
 snapshot = missingKneeFrame.advanceTime(625);
-assert.equal(snapshot.calibration.holdProgressMs, 0, "a no-frame tick interrupts the simultaneous knee hold");
+assert.equal(snapshot.calibration.state, "holding", "an ordinary idle tick preserves the simultaneous knee hold");
 snapshot = missingKneeFrame.processPoseSample(poseWithKnees(750));
-assert.equal(snapshot.calibration.holdProgressMs, 0, "resumed measurements start a new hold");
+assert.equal(snapshot.calibration.holdProgressMs, 750, "resumed measurements continue the same hold");
+// Slow, ordinary inference cadence: idle publication must not erase measured
+// calibration facts or add samples to the geometry average, in either mode.
+for (const kneesRequired of [false, true]) {
+  const idle = createAeroBodyGridService({ calibrationIdPrefix: "idle-cadence" });
+  const control = createAeroBodyGridService({ calibrationIdPrefix: "idle-cadence" });
+  idle.setKneeVisibilityRequired(kneesRequired);
+  control.setKneeVisibilityRequired(kneesRequired);
+  for (let at = 0; at <= 2000; at += 250) {
+    const measured = poseWithKnees(at, 0.5, 0.5);
+    // Vary geometry so extra idle samples would change the captured average.
+    measured.landmarks = measured.landmarks.map((joint) => ({ ...joint, y: joint.y + at / 100000 }));
+    const real = idle.processPoseSample(measured);
+    control.processPoseSample(measured);
+    assert.equal(real.calibrationChecklist.measuredAt, at);
+    if (at === 2000) break;
+    for (const offset of [100, 200]) {
+      const waiting = idle.advanceTime(at + offset);
+      assert.deepEqual(waiting.calibrationChecklist, real.calibrationChecklist, "idle preserves measured checklist including measuredAt");
+      assert.equal(waiting.tracking.allRequiredAnchorsVisible, true);
+      assert.equal(waiting.calibration.state, "holding");
+      assert.equal(waiting.calibration.calibrationId, null, "only a real measured frame can commit the hold");
+      assert.equal(waiting.latestEvidence, null, "idle cannot invent measured evidence before calibration");
+    }
+  }
+  assert.equal(idle.getSnapshot().calibration.calibrationId, "idle-cadence-1", "4 FPS with idle ticks commits at the measured two-second hold");
+  assert.deepEqual(idle.getSnapshot().calibration.bounds, control.getSnapshot().calibration.bounds, "only measured samples enter the average");
+  assert.equal(idle.getSnapshot().calibratedShoulderWorldY, control.getSnapshot().calibratedShoulderWorldY);
+  idle.destroy();
+  control.destroy();
+
+  // Test exact expiry independently of the unchanged consecutive-loss latch.
+  const stale = createAeroBodyGridService();
+  stale.setKneeVisibilityRequired(kneesRequired);
+  for (const at of [0, 250, 500]) stale.processPoseSample(poseWithKnees(at));
+  assert.equal(stale.advanceTime(1249).calibrationChecklist.measuredAt, 500, "749 ms retains real visibility");
+  const expired = stale.advanceTime(1250);
+  assert.equal(expired.calibrationChecklist.measuredAt, null, "750 ms expires real visibility");
+  assert.ok(Object.values(expired.calibrationChecklist.visible).every((visible) => !visible));
+  assert.equal(expired.tracking.allRequiredAnchorsVisible, false);
+  assert.equal(expired.calibration.holdProgressMs, 0, "stale hold expires in both knee modes even before loss latch");
+  assert.equal(stale.advanceTime(3000).calibration.calibrationId, null, "silence alone never calibrates");
+  assert.equal(stale.processPoseSample(poseWithKnees(3250)).calibration.holdProgressMs, 0, "next real measurement starts a new hold");
+  stale.destroy();
+
+  // Missing and sub-threshold measured joints replace prior facts immediately,
+  // not after the idle timeout; exact .5 remains qualified.
+  for (const failure of ["missing", "low", "empty"]) {
+    const failed = createAeroBodyGridService();
+    failed.setKneeVisibilityRequired(kneesRequired);
+    for (const at of [0, 250, 500]) failed.processPoseSample(poseWithKnees(at));
+    failed.advanceTime(600);
+    const jointName = kneesRequired ? "left_knee" : "left_elbow";
+    const bad = poseWithKnees(650);
+    bad.landmarks = failure === "empty" ? [] : failure === "missing"
+      ? bad.landmarks.filter((joint) => joint.name !== jointName)
+      : bad.landmarks.map((joint) => joint.name === jointName ? { ...joint, confidence: 0.499 } : joint);
+    const failedSnapshot = failed.processPoseSample(bad);
+    assert.equal(failedSnapshot.calibrationChecklist.measuredAt, 650);
+    assert.equal(failedSnapshot.calibrationChecklist.visible[jointName], false);
+    assert.equal(failedSnapshot.calibrationChecklist.qualified, false);
+    assert.equal(failedSnapshot.calibration.holdProgressMs, 0);
+    assert.equal(failed.advanceTime(700).calibrationChecklist.measuredAt, 650, "idle preserves the failed measurement too");
+    assert.equal(failed.processPoseSample(poseWithKnees(750, .5, .5)).calibration.holdProgressMs, 0);
+    failed.destroy();
+  }
+
+  const reset = createAeroBodyGridService();
+  reset.setKneeVisibilityRequired(kneesRequired);
+  for (const at of [0, 250, 500]) reset.processPoseSample(poseWithKnees(at), { sourceChangeId: "first" });
+  reset.advanceTime(600);
+  const changed = reset.processPoseSample(poseWithKnees(750), { sourceChangeId: "second" });
+  assert.equal(changed.calibration.holdProgressMs, 0, "source change restarts a preserved hold");
+  assert.equal(changed.calibrationChecklist.measuredAt, 750, "new source owns its own measured checklist");
+  assert.equal(reset.resetCalibration().calibrationChecklist.measuredAt, null);
+  assert.equal(reset.advanceTime(850).calibrationChecklist.measuredAt, null, "idle cannot resurrect a reset checklist");
+  assert.equal(reset.getSnapshot().calibration.holdProgressMs, 0);
+  reset.destroy();
+}
+
 const toggledKnees = createAeroBodyGridService({ calibrationIdPrefix: "toggled-knees" });
 toggledKnees.setKneeVisibilityRequired(true);
 for (let at = 0; at <= 500; at += 250) toggledKnees.processPoseSample(poseWithKnees(at));

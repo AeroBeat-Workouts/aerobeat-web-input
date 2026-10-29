@@ -21,7 +21,27 @@ const server = createServer(async (request, response) => {
         const service = createAeroBodyGridService({calibrationIdPrefix:"browser"});
         for (let timestampMs = 0; timestampMs <= 4000; timestampMs += 250) service.processPoseSample({sourceId:"browser-camera",timestampMs,mirrored:true,landmarks:names.map(name=>({name,x:points[name][0],y:points[name][1],confidence:.95}))});
         const snapshot = service.getSnapshot();
-        document.querySelector("#result").textContent = JSON.stringify({id:snapshot.calibration.calibrationId,state:snapshot.calibration.state,frozen:Object.isFrozen(snapshot),grid:snapshot.calibration.grid.id});
+        const idleCalibration = [false,true].map(kneesRequired => {
+          const slow = createAeroBodyGridService({calibrationIdPrefix:"slow"});
+          slow.setKneeVisibilityRequired(kneesRequired);
+          let retained = true;
+          let measuredOnlyCommit = true;
+          for (let timestampMs = 0; timestampMs <= 2000; timestampMs += 250) {
+            const landmarks = names.map(name=>({name,x:points[name][0],y:points[name][1],confidence:.95}));
+            if (kneesRequired) landmarks.push({name:"left_knee",x:.6,y:.75,confidence:.5},{name:"right_knee",x:.4,y:.75,confidence:.5});
+            slow.processPoseSample({sourceId:"slow-camera",timestampMs,mirrored:true,landmarks});
+            if (timestampMs === 2000) break;
+            for (const offset of [100,200]) {
+              const waiting = slow.advanceTime(timestampMs + offset);
+              retained &&= waiting.calibrationChecklist.measuredAt === timestampMs && waiting.calibrationChecklist.qualified && waiting.tracking.allRequiredAnchorsVisible;
+              measuredOnlyCommit &&= waiting.calibration.calibrationId === null;
+            }
+          }
+          const result = {kneesRequired,retained,measuredOnlyCommit,id:slow.getSnapshot().calibration.calibrationId,measuredAt:slow.getSnapshot().calibrationChecklist.measuredAt};
+          slow.destroy();
+          return result;
+        });
+        document.querySelector("#result").textContent = JSON.stringify({id:snapshot.calibration.calibrationId,state:snapshot.calibration.state,frozen:Object.isFrozen(snapshot),grid:snapshot.calibration.grid.id,idleCalibration});
       </script></body></html>`);
       return;
     }
@@ -47,7 +67,7 @@ try {
   await page.goto(`http://127.0.0.1:${address.port}/`);
   await page.waitForFunction(() => document.querySelector("#result")?.textContent !== "pending");
   const result = JSON.parse(await page.locator("#result").textContent() ?? "{}");
-  assert.deepEqual(result, { id: "browser-1", state: "cooldown", frozen: true, grid: "athlete_body_4x3" });
+  assert.deepEqual(result, { id: "browser-1", state: "cooldown", frozen: true, grid: "athlete_body_4x3", idleCalibration: [false, true].map(kneesRequired => ({ kneesRequired, retained: true, measuredOnlyCommit: true, id: "slow-1", measuredAt: 2000 })) });
   assert.deepEqual(consoleErrors, []);
 } finally {
   await browser.close();
